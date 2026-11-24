@@ -4,6 +4,9 @@ const TRAIL_LEN = 40; // 4s at 10 Hz
 const WORLD_RADIUS_M = 4000; // scope range (match WORLD in backend/generator.js)
 const RING_STEP_M = 1000;
 
+// Map background: "off" | "streets" | "satellite" | "hybrid" (see drawMap).
+let mapLayer = localStorage.getItem("mapLayer") || "satellite";
+
 // --- Units --------------------------------------------------------------
 // "both" (default) shows metric with imperial in parentheses.
 const M_PER_MILE = 1609.344;
@@ -241,6 +244,12 @@ function applyState(state) {
   for (const cfg of state.generators) {
     if (!cards.has(cfg.id)) createCard(cfg.id);
     syncCard(cards.get(cfg.id), cfg);
+    // The server caps the total across all generators (hosted limit).
+    if (state.maxTotalTargets) {
+      const input = cards.get(cfg.id).inputs.targetCount;
+      input.max = state.maxTotalTargets;
+      input.title = `Max ${state.maxTotalTargets.toLocaleString()} targets across all generators`;
+    }
   }
   // keep cards ordered by id
   const container = document.getElementById("cards");
@@ -441,7 +450,9 @@ function resetView() {
 
 // Ctrl + drag grabs the map: it follows the pointer.
 canvas.addEventListener("mousedown", (e) => {
-  if (e.button !== 0 || !e.ctrlKey) return;
+  // On macOS, Chrome reports ctrl+click as a right button press (button 2), so
+  // accept both. A plain right-click (no ctrl) still opens the mark menu.
+  if (!e.ctrlKey || (e.button !== 0 && e.button !== 2)) return;
   e.preventDefault();
   closeMenu();
   panning = { sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
@@ -458,6 +469,12 @@ window.addEventListener("mousemove", (e) => {
 });
 window.addEventListener("mouseup", () => {
   panning = null;
+  // A pan ends in a click on some platforms (which the click handler ignores)
+  // and in none on macOS. Clear the flag after that click would have fired, so
+  // it can't swallow your next real click.
+  setTimeout(() => {
+    justPanned = false;
+  }, 0);
 });
 
 // Ctrl + wheel zooms (wheel up = in). Over the scope it zooms around the
@@ -941,8 +958,173 @@ function updateActions(t) {
   trailSel.value = String(t ? t.cap : TRAIL_LEN);
 }
 
+// --- Map background (MapTiler tiles, fetched through our server) ----------------
+// Tiles are 256 px images addressed by zoom/x/y in Web Mercator. The radar sits
+// at the Space Needle; local meters (x east, y north) are converted to and from
+// Mercator meters, scaled by cos(latitude) so they match real ground meters.
+const RADAR_LAT = 47.6205;
+const RADAR_LON = -122.3493;
+const EARTH_R = 6378137;
+const MERC = 2 * Math.PI * EARTH_R; // width of the world in Mercator meters
+const MERC_K = Math.cos((RADAR_LAT * Math.PI) / 180);
+const RADAR_MERC = {
+  x: (EARTH_R * RADAR_LON * Math.PI) / 180,
+  y: EARTH_R * Math.log(Math.tan(Math.PI / 4 + (RADAR_LAT * Math.PI) / 360)),
+};
+const TILE_MIN_Z = 8;
+const TILE_MAX_Z = 19;
+const MAX_TILES_ON_SCREEN = 120;
+const MAX_TILE_REQUESTS = 10; // in flight at once
+const MAX_CACHED_TILES = 600;
+// Hosted: same server. Electron (file://): the local backend.
+const TILE_BASE = location.protocol.startsWith("http")
+  ? ""
+  : "http://127.0.0.1:9001";
+
+const tileCache = new Map(); // "layer/z/x/y" -> { img, ok }, least recently used first
+let tileRequests = 0;
+
+// Map selector (header): off / streets / satellite / hybrid.
+const mapSelect = document.getElementById("mapSelect");
+mapSelect.value = mapLayer;
+mapSelect.addEventListener("change", () => {
+  mapLayer = mapSelect.value;
+  localStorage.setItem("mapLayer", mapLayer);
+});
+
+function getTile(layer, z, x, y, request) {
+  const key = `${layer}/${z}/${x}/${y}`;
+  let t = tileCache.get(key);
+  if (t) {
+    tileCache.delete(key); // move to the end: recently used
+    tileCache.set(key, t);
+    return t;
+  }
+  if (!request || tileRequests >= MAX_TILE_REQUESTS) return null;
+
+  t = { img: new Image(), ok: false };
+  tileRequests++;
+  t.img.onload = () => {
+    t.ok = true;
+    tileRequests--;
+  };
+  t.img.onerror = () => {
+    tileRequests--;
+    // Keep the failure for a while so we don't hammer the server, then retry.
+    setTimeout(() => {
+      if (tileCache.get(key) === t) tileCache.delete(key);
+    }, 10000);
+  };
+  t.img.src = `${TILE_BASE}/tiles/${key}`;
+  tileCache.set(key, t);
+  for (const k of tileCache.keys()) {
+    if (tileCache.size <= MAX_CACHED_TILES) break;
+    tileCache.delete(k);
+  }
+  return t;
+}
+
+// Draws the map onto canvas context `g` (w x h css px). (centerX, centerY) is
+// the local-meter point at the middle of the canvas; toX/toY convert local
+// meters to canvas pixels. Used for both the scope and the minimap.
+function drawMap(g, w, h, centerX, centerY, scale, toX, toY, attribution) {
+  // Before the canvas has a size the scale is not positive: nothing to draw.
+  if (mapLayer === "off" || !(scale > 0) || w < 2 || h < 2) return;
+  const dpr = window.devicePixelRatio || 1;
+
+  // Visible area in local meters, then in Mercator meters.
+  const hw = w / 2 / scale;
+  const hh = h / 2 / scale;
+  const mxMin = RADAR_MERC.x + (centerX - hw) / MERC_K;
+  const mxMax = RADAR_MERC.x + (centerX + hw) / MERC_K;
+  const myMin = RADAR_MERC.y + (centerY - hh) / MERC_K;
+  const myMax = RADAR_MERC.y + (centerY + hh) / MERC_K;
+
+  // Tile zoom where one tile is about 256 device pixels; fewer tiles if too many.
+  let z = Math.round(Math.log2((MERC * MERC_K * scale * dpr) / 256));
+  if (!Number.isFinite(z) || !Number.isFinite(centerX + centerY)) return;
+  z = Math.max(TILE_MIN_Z, Math.min(TILE_MAX_Z, z));
+  let size, x0, x1, y0, y1;
+  // Bounded: at most one pass per zoom level, so it can never spin forever.
+  for (let pass = 0; pass <= TILE_MAX_Z; pass++) {
+    size = MERC / 2 ** z;
+    const n = 2 ** z;
+    x0 = Math.max(0, Math.floor((mxMin + MERC / 2) / size));
+    x1 = Math.min(n - 1, Math.floor((mxMax + MERC / 2) / size));
+    y0 = Math.max(0, Math.floor((MERC / 2 - myMax) / size));
+    y1 = Math.min(n - 1, Math.floor((MERC / 2 - myMin) / size));
+    if (
+      (x1 - x0 + 1) * (y1 - y0 + 1) <= MAX_TILES_ON_SCREEN ||
+      z <= TILE_MIN_Z
+    ) {
+      break;
+    }
+    z--;
+  }
+
+  // Closest to the center first, so those load first.
+  const cxT = (centerX / MERC_K + RADAR_MERC.x + MERC / 2) / size;
+  const cyT = (MERC / 2 - (centerY / MERC_K + RADAR_MERC.y)) / size;
+  const wanted = [];
+  for (let ty = y0; ty <= y1; ty++) {
+    for (let tx = x0; tx <= x1; tx++) {
+      wanted.push([tx, ty, (tx + 0.5 - cxT) ** 2 + (ty + 0.5 - cyT) ** 2]);
+    }
+  }
+  wanted.sort((a, b) => a[2] - b[2]);
+
+  for (const [tx, ty] of wanted) {
+    // Screen rectangle of this tile (rounded outward so tiles leave no seams).
+    const left = toX((-MERC / 2 + tx * size - RADAR_MERC.x) * MERC_K);
+    const right = toX((-MERC / 2 + (tx + 1) * size - RADAR_MERC.x) * MERC_K);
+    const top = toY((MERC / 2 - ty * size - RADAR_MERC.y) * MERC_K);
+    const bottom = toY((MERC / 2 - (ty + 1) * size - RADAR_MERC.y) * MERC_K);
+    const dx = Math.floor(left);
+    const dy = Math.floor(top);
+    const dw = Math.ceil(right) - dx;
+    const dh = Math.ceil(bottom) - dy;
+
+    const t = getTile(mapLayer, z, tx, ty, true);
+    if (t?.ok) {
+      g.drawImage(t.img, dx, dy, dw, dh);
+      continue;
+    }
+    // Not loaded yet: show the part of a coarser tile we already have.
+    for (let d = 1; d <= 3 && z - d >= TILE_MIN_Z; d++) {
+      const p = getTile(mapLayer, z - d, tx >> d, ty >> d, false);
+      if (!p?.ok) continue;
+      const part = 256 / 2 ** d;
+      g.drawImage(
+        p.img,
+        (tx & (2 ** d - 1)) * part,
+        (ty & (2 ** d - 1)) * part,
+        part,
+        part,
+        dx,
+        dy,
+        dw,
+        dh,
+      );
+      break;
+    }
+  }
+
+  // Imagery is bright: dim it so the targets stand out.
+  if (mapLayer !== "streets") {
+    g.fillStyle = "rgba(11, 15, 20, 0.35)";
+    g.fillRect(0, 0, w, h);
+  }
+  if (attribution) {
+    g.fillStyle = "rgba(255, 255, 255, 0.7)";
+    g.font = "10px system-ui";
+    g.fillText("© MapTiler © OpenStreetMap contributors", 8, h - 8);
+  }
+}
+
 function draw() {
   requestAnimationFrame(draw);
+  // The canvas has no size until the first layout: nothing to draw yet.
+  if (cssW < 2 || cssH < 2) return;
   const now = performance.now();
 
   ctx.fillStyle = "#0b0f14";
@@ -956,6 +1138,7 @@ function draw() {
   const toY = (y) => cy - (y - view.y) * scale; // +y is north (up)
   const ox = toX(0); // the radar
   const oy = toY(0);
+  drawMap(ctx, cssW, cssH, view.x, view.y, scale, toX, toY, true);
 
   // Trail: sample a few points evenly (always including oldest and newest)
   // and draw a smooth curve through them instead of all 40. Returns the
@@ -1021,8 +1204,10 @@ function draw() {
   };
 
   // range rings
-  ctx.strokeStyle = "#1c2530";
-  ctx.fillStyle = "#4b5b6e";
+  // Brighter over a map, so the rings stay visible.
+  const overMap = mapLayer !== "off";
+  ctx.strokeStyle = overMap ? "rgba(255, 255, 255, 0.35)" : "#1c2530";
+  ctx.fillStyle = overMap ? "#e2e8f0" : "#4b5b6e";
   ctx.lineWidth = 1;
   ctx.font = "11px system-ui";
   for (let r = RING_STEP_M; r <= WORLD_RADIUS_M; r += RING_STEP_M) {
@@ -1242,7 +1427,7 @@ function drawMinimap(now, cx, cy, scale) {
   setText(zoomLabel, `${view.zoom.toFixed(1)}×`);
   // Targets move at 10 Hz and there can be 100k of them: repaint ~10x/s, or
   // right away when the view changes.
-  const sig = `${view.x}|${view.y}|${view.zoom}|${cssW}|${cssH}|${selectedKey}`;
+  const sig = `${view.x}|${view.y}|${view.zoom}|${cssW}|${cssH}|${selectedKey}|${mapLayer}`;
   if (sig === miniSig && now - miniAt < 100) return;
   miniSig = sig;
   miniAt = now;
@@ -1251,7 +1436,20 @@ function drawMinimap(now, cx, cy, scale) {
   const c = miniSize / 2;
   mctx.fillStyle = "#0b0f14";
   mctx.fillRect(0, 0, miniSize, miniSize);
-  mctx.strokeStyle = "#1c2530";
+  // The same map, zoomed out to the whole radar range.
+  drawMap(
+    mctx,
+    miniSize,
+    miniSize,
+    0,
+    0,
+    s,
+    (x) => c + x * s,
+    (y) => c - y * s,
+    false,
+  );
+  mctx.strokeStyle =
+    mapLayer === "off" ? "#1c2530" : "rgba(255, 255, 255, 0.35)";
   mctx.beginPath();
   mctx.arc(c, c, WORLD_RADIUS_M * s, 0, Math.PI * 2);
   mctx.stroke();

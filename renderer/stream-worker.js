@@ -7,7 +7,13 @@
 //   16..20 u32 target_count
 //   20..   target_count * 32-byte records
 
-const URL = "ws://127.0.0.1:9001";
+// Hosted: the page and the WebSocket come from the same server (wss on https).
+// In Electron the page is a file:// URL, so use the local backend instead.
+const loc = self.location;
+const URL =
+  loc.protocol === "http:" || loc.protocol === "https:"
+    ? `${loc.protocol === "https:" ? "wss" : "ws"}://${loc.host}/ws`
+    : "ws://127.0.0.1:9001/ws";
 const HEADER_BYTES = 20;
 const RECORD_BYTES = 32;
 const STATS_INTERVAL_MS = 500;

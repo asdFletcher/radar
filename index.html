@@ -26,6 +26,7 @@
       }
       header {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         gap: 12px;
         padding: 10px 14px;
@@ -496,6 +497,13 @@
         <strong>Generators</strong>
         <select id="countSelect"></select>
         <span class="spacer"></span>
+        <span class="hint">Map</span>
+        <select id="mapSelect">
+          <option value="satellite">Satellite</option>
+          <option value="streets">Streets</option>
+          <option value="hybrid">Satellite + streets</option>
+          <option value="off">Off</option>
+        </select>
         <span class="hint">Units</span>
         <div class="seg" id="unitSeg"></div>
         <span id="conn">disconnected</span>
