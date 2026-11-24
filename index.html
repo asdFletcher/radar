@@ -1,0 +1,522 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Radar Mock</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        background: #0b0f14;
+        color: #d6dde6;
+        font:
+          13px/1.4 -apple-system,
+          system-ui,
+          sans-serif;
+      }
+      main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 14px;
+        border-bottom: 1px solid #1c2530;
+      }
+      header .spacer {
+        flex: 1;
+      }
+      #conn {
+        padding: 2px 8px;
+        border-radius: 10px;
+        background: #5a1f1f;
+        font-size: 12px;
+      }
+      #conn.on {
+        background: #1d5a2e;
+      }
+      header .hint {
+        color: #8fa0b3;
+        font-size: 12px;
+      }
+      .seg {
+        display: flex;
+      }
+      .seg button {
+        padding: 4px 10px;
+        border: 1px solid #2a3644;
+        background: #121922;
+        color: inherit;
+        cursor: pointer;
+      }
+      .seg button.active {
+        background: #2563eb;
+        border-color: #2563eb;
+      }
+      #scopeWrap {
+        flex: 1;
+        min-height: 0;
+        position: relative;
+      }
+      /* Shared look for the hover popup and the tracked-target panel.
+         No display rule here: it would override the [hidden] attribute. */
+      .info {
+        font:
+          12px/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        white-space: pre;
+        background: rgba(15, 21, 28, 0.94);
+        border: 1px solid #2a3644;
+        border-radius: 4px;
+        padding: 8px 12px;
+        pointer-events: none; /* never block the canvas underneath */
+      }
+      #tip {
+        position: fixed;
+        z-index: 10;
+      }
+      #selected {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        border-color: #2563eb;
+      }
+      canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      /* Minimap: top right of the scope. */
+      #minimapWrap {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        width: 180px;
+        background: rgba(15, 21, 28, 0.9);
+        border: 1px solid #2a3644;
+        border-radius: 4px;
+      }
+      #minimap {
+        width: 180px;
+        height: 180px;
+        cursor: crosshair;
+      }
+      #minimapBar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 4px 6px;
+        border-top: 1px solid #2a3644;
+        font-size: 11px;
+        color: #8fa0b3;
+      }
+      #minimapBar button {
+        padding: 2px 6px;
+        border: 1px solid #2a3644;
+        border-radius: 3px;
+        background: #121922;
+        color: inherit;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      #targets {
+        width: 320px;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid #1c2530;
+      }
+      .panel-head {
+        padding: 10px 14px;
+        border-bottom: 1px solid #1c2530;
+      }
+      .panel-head .title {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 8px;
+      }
+      #targetCount {
+        color: #8fa0b3;
+        font-variant-numeric: tabular-nums;
+      }
+      #targetFilter {
+        width: 100%;
+        padding: 5px 8px;
+        border: 1px solid #2a3644;
+        border-radius: 3px;
+        background: #121922;
+        color: inherit;
+      }
+      .chiplabel {
+        margin-top: 10px;
+        color: #8fa0b3;
+        font-size: 12px;
+      }
+      #ignoreTypes,
+      #ignoreAffils {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      .chip {
+        padding: 3px 9px;
+        border: 1px solid #2a3644;
+        border-radius: 11px;
+        background: #121922;
+        color: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      /* Active = this tag is ignored (hidden), shown crossed out. */
+      .chip.active {
+        background: #2a3644;
+        color: #8fa0b3;
+        text-decoration: line-through;
+      }
+      .chk {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 8px;
+        color: #8fa0b3;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      #actions {
+        padding: 10px 14px;
+        border-bottom: 1px solid #1c2530;
+        background: #0f151c;
+      }
+      #actionTitle {
+        margin-bottom: 8px;
+        font:
+          12px ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        color: #8fa0b3;
+      }
+      .btnrow {
+        display: flex;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      .btnrow button,
+      .btnrow select {
+        flex: 1;
+        min-width: 0;
+        padding: 5px 4px;
+        border: 1px solid #2a3644;
+        border-radius: 3px;
+        background: #121922;
+        color: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .btnrow button:disabled,
+      .btnrow select:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .btnrow .trail {
+        flex: 1.4;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: #8fa0b3;
+        font-size: 12px;
+      }
+      /* Mark buttons always wear their scope color; the current one is filled. */
+      .aff.friendly {
+        color: #22c55e;
+        border-color: #166534;
+      }
+      .aff.enemy {
+        color: #ef4444;
+        border-color: #7f1d1d;
+      }
+      .aff.unknown {
+        color: #eab308;
+        border-color: #713f12;
+      }
+      .aff.friendly.active {
+        background: #166534;
+        border-color: #22c55e;
+        color: #fff;
+      }
+      .aff.enemy.active {
+        background: #7f1d1d;
+        border-color: #ef4444;
+        color: #fff;
+      }
+      .aff.unknown.active {
+        background: #713f12;
+        border-color: #eab308;
+        color: #fff;
+      }
+      /* Right-click menu on a dot. No display rule: it would beat [hidden]. */
+      #ctxMenu {
+        position: fixed;
+        z-index: 20;
+        min-width: 150px;
+        padding: 6px;
+        background: rgba(15, 21, 28, 0.98);
+        border: 1px solid #2a3644;
+        border-radius: 6px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+      }
+      #ctxMenu .mtitle {
+        padding: 2px 6px 6px;
+        font:
+          12px ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        color: #8fa0b3;
+      }
+      :where(#ctxMenu) button {
+        width: 100%;
+        margin-top: 4px;
+        padding: 6px 8px;
+        text-align: left;
+        background: #121922;
+        border: 1px solid #2a3644;
+        border-radius: 3px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      :where(#ctxMenu) button:hover {
+        background: #1c2530;
+      }
+      #targetList {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+      /* Rows are absolutely positioned inside a tall spacer, so only the
+         visible ones exist in the DOM (the list can hold 100k targets). */
+      #targetInner {
+        position: relative;
+      }
+      .trow {
+        position: absolute;
+        left: 0;
+        right: 0;
+        height: 26px;
+        display: grid;
+        grid-template-columns: 10px 64px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        padding: 0 14px 0 12px;
+        border-left: 3px solid transparent;
+        font:
+          12px ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .trow:hover {
+        background: #17202b;
+      }
+      .trow.sel {
+        background: #172554;
+        border-left-color: #2563eb;
+      }
+      /* Section header: Unknown / Enemy / Friendly */
+      .trow.hdr {
+        background: #0f151c;
+        border-bottom: 1px solid #1c2530;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 11px;
+        cursor: default;
+      }
+      .trow.hdr:hover {
+        background: #0f151c;
+      }
+      .trow.hdr .rng {
+        color: #8fa0b3;
+        font-weight: 400;
+      }
+      /* Ignored targets stay listed (so they can be un-ignored) but dimmed. */
+      .trow.ign {
+        opacity: 0.45;
+        text-decoration: line-through;
+      }
+      .trow .sw {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+      }
+      .trow .tag {
+        color: #8fa0b3;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .trow .tag.unid {
+        font-style: italic;
+        color: #5d6b7c;
+      }
+      .trow .rng {
+        text-align: right;
+        color: #8fa0b3;
+      }
+      #cards {
+        width: 360px;
+        flex-shrink: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        scrollbar-gutter: stable; /* reserve space so the scrollbar never covers content */
+        border-left: 1px solid #1c2530;
+        padding: 14px 18px 14px 16px;
+      }
+      .card {
+        border: 1px solid #1c2530;
+        border-left-width: 4px;
+        border-radius: 4px;
+        padding: 12px 16px;
+        margin-bottom: 14px;
+        background: #0f151c;
+      }
+      .card h3 {
+        margin: 0 0 4px;
+        font-size: 13px;
+        display: flex;
+        justify-content: space-between;
+      }
+      .telemetry {
+        font-variant-numeric: tabular-nums;
+        color: #8fa0b3;
+        margin-bottom: 10px;
+        overflow-wrap: anywhere;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr) 40px;
+        align-items: center;
+        gap: 12px;
+        margin: 6px 0;
+      }
+      /* Inputs have a built-in minimum width that can push the grid wider than the card. */
+      .row input[type="range"] {
+        width: 100%;
+        min-width: 0;
+        margin: 0;
+      }
+      .row input[type="number"],
+      .row select {
+        grid-column: 2 / 4;
+        width: 100%;
+        min-width: 0;
+      }
+      .row output {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .btns {
+        display: flex;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .btns button {
+        flex: 1;
+        padding: 6px;
+        border: 1px solid #2a3644;
+        background: #121922;
+        color: inherit;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <aside id="targets">
+      <div class="panel-head">
+        <div class="title">
+          <strong>Targets</strong>
+          <span id="targetCount"></span>
+        </div>
+        <input
+          id="targetFilter"
+          type="search"
+          placeholder="Filter by ID, tag or mark"
+        />
+        <div class="chiplabel">Ignore by type</div>
+        <div id="ignoreTypes"></div>
+        <div class="chiplabel">Ignore by designation</div>
+        <div id="ignoreAffils"></div>
+        <label class="chk">
+          <input type="checkbox" id="showIgnored" checked /> Show ignored
+        </label>
+      </div>
+      <div id="actions">
+        <div id="actionTitle">Select a target to mark it</div>
+        <div class="btnrow">
+          <button data-affil="friendly" class="aff friendly" disabled>
+            Friendly
+          </button>
+          <button data-affil="enemy" class="aff enemy" disabled>Enemy</button>
+          <button data-affil="unknown" class="aff unknown" disabled>
+            Unknown
+          </button>
+        </div>
+        <div class="btnrow">
+          <button id="ignoreBtn" disabled>Ignore</button>
+          <label class="trail">
+            Trail
+            <select id="trailSel" disabled>
+              <option value="40">40 pts</option>
+              <option value="100">100 pts</option>
+              <option value="250">250 pts</option>
+              <option value="500">500 pts</option>
+              <option value="1000">1,000 pts</option>
+              <option value="2500">2,500 pts</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div id="targetList"><div id="targetInner"></div></div>
+    </aside>
+    <main>
+      <header>
+        <strong>Generators</strong>
+        <select id="countSelect"></select>
+        <span class="spacer"></span>
+        <span class="hint">Units</span>
+        <div class="seg" id="unitSeg"></div>
+        <span id="conn">disconnected</span>
+      </header>
+      <div id="scopeWrap">
+        <canvas id="scope"></canvas>
+        <div id="selected" class="info" hidden></div>
+        <div id="minimapWrap">
+          <canvas id="minimap"></canvas>
+          <div id="minimapBar">
+            <span id="zoomLabel">1.0×</span>
+            <button id="resetView" title="Reset zoom and pan">
+              Reset view
+            </button>
+          </div>
+        </div>
+      </div>
+    </main>
+    <aside id="cards"></aside>
+    <div id="tip" class="info" hidden></div>
+    <div id="ctxMenu" hidden></div>
+    <script src="renderer/app.js"></script>
+  </body>
+</html>

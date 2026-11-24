@@ -1,0 +1,19 @@
+{
+  "name": "echodyne-demo",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "backend": "node backend/server.js",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-reload": "^2.0.0-alpha.1",
+    "prettier": "^3.10.1"
+  },
+  "dependencies": {
+    "ws": "^8.23.0"
+  }
+}
