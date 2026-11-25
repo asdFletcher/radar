@@ -795,6 +795,11 @@ function renderHelp() {
   box.checked = invertPan;
   label.append(box, " Invert pan (map moves opposite the drag)");
   helpBody.appendChild(label);
+  const clear = document.createElement("button");
+  clear.id = "clearSettings";
+  clear.textContent = "Clear all saved settings";
+  clear.title = "Forget everything saved in this browser and reload";
+  helpBody.appendChild(clear);
 }
 
 helpBody.addEventListener("click", (e) => {
@@ -803,6 +808,15 @@ helpBody.addEventListener("click", (e) => {
     capturing =
       capturing === keyBtn.dataset.action ? null : keyBtn.dataset.action;
     renderHelp();
+  } else if (e.target.id === "clearSettings") {
+    if (
+      confirm(
+        "Clear all saved settings (hotkeys, units, map, dimmer, follow, pan) and reload?",
+      )
+    ) {
+      localStorage.clear();
+      location.reload();
+    }
   } else if (e.target.id === "resetKeys") {
     for (const a of HOTKEY_ACTIONS) hotkeys[a.id] = a.def;
     saveHotkeys();
@@ -1422,6 +1436,15 @@ for (const [id, label, title] of MAP_CHOICES) {
 }
 paintMapButtons();
 
+// Map dimmer: how much the map is darkened (0-90%), so targets stand out.
+const mapDimEl = document.getElementById("mapDim");
+let mapDim = Number(localStorage.getItem("mapDim") ?? 50) / 100;
+mapDimEl.value = String(Math.round(mapDim * 100));
+mapDimEl.addEventListener("input", () => {
+  mapDim = Number(mapDimEl.value) / 100;
+  localStorage.setItem("mapDim", mapDimEl.value);
+});
+
 function getTile(layer, z, x, y, request) {
   const key = `${layer}/${z}/${x}/${y}`;
   let t = tileCache.get(key);
@@ -1543,9 +1566,9 @@ function drawMap(g, w, h, centerX, centerY, scale, toX, toY, attribution) {
     }
   }
 
-  // Imagery is bright: dim it so the targets stand out.
-  if (mapLayer !== "streets") {
-    g.fillStyle = "rgba(11, 15, 20, 0.35)";
+  // Dim the map so the targets stand out (user-adjustable).
+  if (mapDim > 0) {
+    g.fillStyle = `rgba(11, 15, 20, ${mapDim})`;
     g.fillRect(0, 0, w, h);
   }
   if (attribution) {
@@ -1882,7 +1905,7 @@ function drawMinimap(now, cx, cy, scale) {
   setText(zoomLabel, `${view.zoom.toFixed(1)}×`);
   // Targets move at 10 Hz and there can be 100k of them: repaint ~10x/s, or
   // right away when the view changes.
-  const sig = `${view.x}|${view.y}|${view.zoom}|${cssW}|${cssH}|${selectedKey}|${mapLayer}`;
+  const sig = `${view.x}|${view.y}|${view.zoom}|${cssW}|${cssH}|${selectedKey}|${mapLayer}|${mapDim}`;
   if (sig === miniSig && now - miniAt < 100) return;
   miniSig = sig;
   miniAt = now;

@@ -473,7 +473,8 @@
         border-color: #38bdf8;
         color: #38bdf8;
       }
-      #resetKeys {
+      #resetKeys,
+      #clearSettings {
         margin-top: 8px;
         padding: 4px 10px;
         border: 1px solid #2a3644;
@@ -623,6 +624,10 @@
         </label>
         <span class="hint">Map</span>
         <div class="seg" id="mapSeg"></div>
+        <label class="hint" title="Darken the map so targets stand out">
+          Dim
+          <input type="range" id="mapDim" min="0" max="90" step="5" />
+        </label>
         <span class="hint">Units</span>
         <div class="seg" id="unitSeg"></div>
         <span id="conn">disconnected</span>
