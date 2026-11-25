@@ -534,12 +534,11 @@ function clampView() {
 
 function resetView() {
   Object.assign(view, HOME_VIEW);
-  followPaused = true; // stay on the home view until the next selection
+  stopFollowing(); // untick Follow so the home view stays put
 }
 
 // Follow: while a target is selected, keep it at the center of the scope.
-// Panning by hand turns it off; resetting the view pauses it until you select
-// again.
+// Panning by hand, or resetting the view, turns it off.
 const followEl = document.getElementById("followSel");
 followEl.checked = localStorage.getItem("follow") !== "0"; // default on
 followEl.addEventListener("change", () => {
