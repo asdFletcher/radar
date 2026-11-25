@@ -1,6 +1,7 @@
 const HEADER_BYTES = 20;
 const RECORD_BYTES = 32;
-const TRAIL_LEN = 40; // 4s at 10 Hz
+const TRAIL_LEN = 40; // 4s at 10 Hz; trails longer than this are thinned when drawn
+const DEFAULT_TRAIL_LEN = 1000; // default trail capacity in points
 const WORLD_RADIUS_M = 4000; // scope range (match WORLD in backend/generator.js)
 const RING_STEP_M = 1000;
 
@@ -26,6 +27,15 @@ function fmtDist(m) {
   return withUnits(
     `${Math.round(m).toLocaleString()} m`, // always whole meters
     `${mi.toFixed(Math.abs(mi) < 1 ? 3 : 2)} mi`,
+  );
+}
+
+// Height in meters -> "85 m (279 ft)"
+const FT_PER_M = 3.28084;
+function fmtHeight(m) {
+  return withUnits(
+    `${Math.round(m).toLocaleString()} m`,
+    `${Math.round(m * FT_PER_M).toLocaleString()} ft`,
   );
 }
 
@@ -57,6 +67,7 @@ const AFFIL_COLOR = {
   friendly: "#22c55e",
   enemy: "#ef4444",
   unknown: "#eab308",
+  neutral: "#94a3b8",
 };
 
 // Generator colors: golden-angle steps within cyan..magenta, so they never
@@ -88,7 +99,7 @@ let listVersion = 0; // bumped whenever a target appears or disappears
 
 // User marks per target, keyed like `tracks`. They survive a target going stale
 // (for example while its generator is paused) but not a reset or removal.
-// { affil?: "friendly" | "enemy" | "unknown", ignored?: boolean, trailLen?: number }
+// { affil?: "friendly" | "enemy" | "neutral" | "unknown", ignored?: boolean, trailLen?: number }
 const marks = new Map();
 
 function dropGeneratorTracks(gen) {
@@ -101,16 +112,24 @@ function dropGeneratorTracks(gen) {
 // A target is ignored if it, or its tag, is ignored. Re-checked every frame
 // because a target's tag can change when it gets identified.
 const ignoredTags = new Set();
-// Same idea for designations: "friendly" | "enemy" | "unknown".
+// Same idea for designations: "friendly" | "enemy" | "neutral" | "unknown".
 const ignoredAffils = new Set();
-const affilOf = (t) => t.mark?.affil ?? "unknown";
+const BIRD = CLASS_NAMES.indexOf("bird");
+// Designation before the user marks a target: birds are neutral; in each
+// generator, tracks 1-2 are enemies and 3-4 are friendlies; the rest unknown.
+function defaultAffil(t) {
+  if (t.cls === BIRD) return "neutral";
+  if (t.id <= 2) return "enemy";
+  if (t.id <= 4) return "friendly";
+  return "unknown";
+}
+const affilOf = (t) => t.mark?.affil ?? defaultAffil(t);
 const ignoredByFilter = (t) =>
   ignoredTags.has(t.cls) || ignoredAffils.has(affilOf(t));
 const isIgnored = (t) => !!t.mark?.ignored || ignoredByFilter(t);
 
-// Color key for batching and tinting: every target is "unknown" (yellow)
-// until the user marks it friendly or enemy.
-const colorKeyOf = (t) => t.mark?.affil || "unknown";
+// Color key for batching and tinting: the target's designation.
+const colorKeyOf = affilOf;
 const colorOfKey = (k) =>
   typeof k === "number" ? colorFor(k) : AFFIL_COLOR[k];
 const colorOf = (t) => colorOfKey(colorKeyOf(t));
@@ -185,7 +204,7 @@ function ingestFrame(buf) {
     let t = tracks.get(key);
     if (!t) {
       const mark = marks.get(key);
-      const cap = mark?.trailLen ?? TRAIL_LEN;
+      const cap = mark?.trailLen ?? DEFAULT_TRAIL_LEN;
       t = {
         gen,
         id,
@@ -199,7 +218,11 @@ function ingestFrame(buf) {
       tracks.set(key, t);
       listVersion++;
     }
-    t.cls = view.getUint8(o + 28);
+    const cls = view.getUint8(o + 28);
+    // Identification can change a target's default designation (birds are
+    // neutral), so the list has to regroup.
+    if (cls !== t.cls) listVersion++;
+    t.cls = cls;
     t.strength = view.getUint8(o + 29);
     t.z = z;
     t.vz = vz;
@@ -417,7 +440,7 @@ canvas.addEventListener("mouseleave", () => {
 });
 // Resolved inside draw(), where the hit test runs.
 canvas.addEventListener("click", (e) => {
-  if (e.ctrlKey || justPanned) {
+  if (justPanned) {
     justPanned = false; // the end of a pan isn't a click on a dot
     return;
   }
@@ -448,12 +471,12 @@ function resetView() {
   view.zoom = 1;
 }
 
-// Ctrl + drag grabs the map: it follows the pointer.
+// Middle-mouse drag pans. By default the map follows the pointer (drag left,
+// map moves left); "Invert pan" in the help panel moves it the other way.
+let invertPan = localStorage.getItem("invertPan") === "1";
 canvas.addEventListener("mousedown", (e) => {
-  // On macOS, Chrome reports ctrl+click as a right button press (button 2), so
-  // accept both. A plain right-click (no ctrl) still opens the mark menu.
-  if (!e.ctrlKey || (e.button !== 0 && e.button !== 2)) return;
-  e.preventDefault();
+  if (e.button !== 1) return;
+  e.preventDefault(); // no browser autoscroll
   closeMenu();
   panning = { sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
 });
@@ -463,8 +486,9 @@ window.addEventListener("mousemove", (e) => {
   const dy = e.clientY - panning.sy;
   if (Math.abs(dx) + Math.abs(dy) > 3) justPanned = true;
   const s = pxPerMeter();
-  view.x = panning.vx - dx / s;
-  view.y = panning.vy + dy / s; // screen y grows downward, world y upward
+  const k = invertPan ? 1 : -1;
+  view.x = panning.vx + (k * dx) / s;
+  view.y = panning.vy - (k * dy) / s; // screen y grows downward, world y upward
   clampView();
 });
 window.addEventListener("mouseup", () => {
@@ -477,12 +501,10 @@ window.addEventListener("mouseup", () => {
   }, 0);
 });
 
-// Ctrl + wheel zooms (wheel up = in). Over the scope it zooms around the
-// pointer; elsewhere it zooms in on the tracked target, or the center.
-window.addEventListener(
+// Mouse wheel over the scope zooms around the pointer (up = in, down = out).
+canvas.addEventListener(
   "wheel",
   (e) => {
-    if (!e.ctrlKey) return;
     e.preventDefault(); // also stops trackpad pinch from zooming the page
     closeMenu();
     const delta = Math.max(-100, Math.min(100, e.deltaY));
@@ -494,22 +516,21 @@ window.addEventListener(
     );
     if (view.zoom === oldZoom) return;
     const after = pxPerMeter();
-    if (e.target === canvas) {
-      const r = canvas.getBoundingClientRect();
-      const mx = e.clientX - r.left - cssW / 2;
-      const my = e.clientY - r.top - cssH / 2;
-      // Keep the world point under the pointer where it is.
-      view.x += mx / before - mx / after;
-      view.y -= my / before - my / after;
-    } else {
-      const t = selectedTrack();
-      if (t) {
-        view.x = t.x;
-        view.y = t.y;
-      }
-      // No tracked target: keep the current center.
-    }
+    const r = canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left - cssW / 2;
+    const my = e.clientY - r.top - cssH / 2;
+    // Keep the world point under the pointer where it is.
+    view.x += mx / before - mx / after;
+    view.y -= my / before - my / after;
     clampView();
+  },
+  { passive: false },
+);
+// Stop ctrl+wheel / pinch elsewhere from zooming the whole page.
+window.addEventListener(
+  "wheel",
+  (e) => {
+    if (e.ctrlKey) e.preventDefault();
   },
   { passive: false },
 );
@@ -519,11 +540,229 @@ function select(key) {
   selectedKey = key;
   listDirty = true;
 }
-window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    select(null);
-    closeMenu();
+
+// --- Hotkeys -----------------------------------------------------------
+// Every action has one key combo, editable in the help panel and saved in
+// localStorage. A combo looks like "R", "Escape" or "Ctrl+Shift+K".
+const markAction = (affil) => () => {
+  const t = selectedTrack();
+  if (t) setMark(t, { affil });
+};
+const zoomBy = (f) => {
+  view.zoom *= f;
+  clampView();
+};
+const HOTKEY_ACTIONS = [
+  {
+    id: "help",
+    label: "Show / hide controls",
+    def: "?",
+    run: () => toggleHelp(),
+  },
+  {
+    id: "deselect",
+    label: "Deselect target, close menu",
+    def: "Escape",
+    run: () => {
+      select(null);
+      closeMenu();
+    },
+  },
+  { id: "resetView", label: "Reset zoom and pan", def: "R", run: resetView },
+  { id: "zoomIn", label: "Zoom in", def: "+", run: () => zoomBy(1.25) },
+  { id: "zoomOut", label: "Zoom out", def: "-", run: () => zoomBy(1 / 1.25) },
+  {
+    id: "markFriendly",
+    label: "Mark selected: Friendly",
+    def: "F",
+    run: markAction("friendly"),
+  },
+  {
+    id: "markEnemy",
+    label: "Mark selected: Enemy",
+    def: "E",
+    run: markAction("enemy"),
+  },
+  {
+    id: "markNeutral",
+    label: "Mark selected: Neutral",
+    def: "N",
+    run: markAction("neutral"),
+  },
+  {
+    id: "markUnknown",
+    label: "Mark selected: Unknown",
+    def: "U",
+    run: markAction("unknown"),
+  },
+  {
+    id: "toggleIgnore",
+    label: "Ignore / unignore selected",
+    def: "I",
+    run: () => {
+      const t = selectedTrack();
+      if (t) setMark(t, { ignored: !t.mark?.ignored });
+    },
+  },
+];
+
+function loadHotkeys() {
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem("hotkeys") || "{}") || {};
+  } catch {}
+  const map = {};
+  for (const a of HOTKEY_ACTIONS) {
+    map[a.id] = typeof saved[a.id] === "string" ? saved[a.id] : a.def; // "" = unbound
   }
+  return map;
+}
+const hotkeys = loadHotkeys();
+const saveHotkeys = () =>
+  localStorage.setItem("hotkeys", JSON.stringify(hotkeys));
+
+// Key event -> combo string (null for a bare modifier key).
+function comboOf(e) {
+  let key = e.key;
+  if (["Control", "Shift", "Alt", "Meta"].includes(key)) return null;
+  if (key === " ") key = "Space";
+  if (key.length === 1) key = key.toUpperCase();
+  const parts = [];
+  if (e.ctrlKey) parts.push("Ctrl");
+  if (e.altKey) parts.push("Alt");
+  if (e.metaKey) parts.push("Meta");
+  // Shift is part of the symbol for punctuation ("?" , "+"), so only list it
+  // for letters and named keys.
+  if (e.shiftKey && (key.length > 1 || /[A-Z]/.test(key))) parts.push("Shift");
+  return [...parts, key].join("+");
+}
+
+// --- Help panel: hotkeys (editable) and mouse controls ---------------------
+const helpOverlay = document.getElementById("helpOverlay");
+const helpBody = document.getElementById("helpBody");
+let capturing = null; // action id waiting for a key press
+
+function toggleHelp() {
+  helpOverlay.hidden = !helpOverlay.hidden;
+  capturing = null;
+  if (!helpOverlay.hidden) renderHelp();
+}
+
+function renderHelp() {
+  helpBody.replaceChildren();
+  const h = (text) => {
+    const el = document.createElement("h4");
+    el.textContent = text;
+    helpBody.appendChild(el);
+  };
+  const row = (label, valueEl) => {
+    const el = document.createElement("div");
+    el.className = "hrow";
+    const l = document.createElement("span");
+    l.textContent = label;
+    el.append(l, valueEl);
+    helpBody.appendChild(el);
+  };
+
+  h("Hotkeys (click a key to change it)");
+  for (const a of HOTKEY_ACTIONS) {
+    const b = document.createElement("button");
+    b.className = "keybtn";
+    b.dataset.action = a.id;
+    const waiting = capturing === a.id;
+    b.textContent = waiting ? "Press a key…" : hotkeys[a.id] || "—";
+    b.classList.toggle("waiting", waiting);
+    b.title = "Click, then press the new key. Backspace unbinds, Esc cancels.";
+    row(a.label, b);
+  }
+  const reset = document.createElement("button");
+  reset.id = "resetKeys";
+  reset.textContent = "Reset hotkeys to defaults";
+  helpBody.appendChild(reset);
+
+  h("Mouse");
+  const text = (s) =>
+    Object.assign(document.createElement("span"), { textContent: s });
+  row("Select a target", text("Click"));
+  row("Mark a target", text("Right-click it"));
+  row("Zoom in / out", text("Wheel up / down"));
+  row("Pan", text("Middle-click drag"));
+  row("Recenter", text("Click or drag the minimap"));
+
+  h("Options");
+  const label = document.createElement("label");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.id = "invertPan";
+  box.checked = invertPan;
+  label.append(box, " Invert pan (map moves opposite the drag)");
+  helpBody.appendChild(label);
+}
+
+helpBody.addEventListener("click", (e) => {
+  const keyBtn = e.target.closest(".keybtn");
+  if (keyBtn) {
+    capturing =
+      capturing === keyBtn.dataset.action ? null : keyBtn.dataset.action;
+    renderHelp();
+  } else if (e.target.id === "resetKeys") {
+    for (const a of HOTKEY_ACTIONS) hotkeys[a.id] = a.def;
+    saveHotkeys();
+    capturing = null;
+    renderHelp();
+  }
+});
+helpBody.addEventListener("change", (e) => {
+  if (e.target.id !== "invertPan") return;
+  invertPan = e.target.checked;
+  localStorage.setItem("invertPan", invertPan ? "1" : "0");
+});
+document.getElementById("helpBtn").addEventListener("click", toggleHelp);
+document.getElementById("helpClose").addEventListener("click", toggleHelp);
+helpOverlay.addEventListener("mousedown", (e) => {
+  if (e.target === helpOverlay) toggleHelp(); // click outside the panel
+});
+
+// Capture phase: while rebinding, this sees the key before anything else.
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (!capturing) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      capturing = null;
+    } else if (e.key === "Backspace" || e.key === "Delete") {
+      hotkeys[capturing] = "";
+      saveHotkeys();
+      capturing = null;
+    } else {
+      const combo = comboOf(e);
+      if (!combo) return; // wait for a real key
+      // One action per combo: take it away from any other action.
+      for (const id in hotkeys) if (hotkeys[id] === combo) hotkeys[id] = "";
+      hotkeys[capturing] = combo;
+      saveHotkeys();
+      capturing = null;
+    }
+    renderHelp();
+  },
+  true,
+);
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !helpOverlay.hidden) {
+    toggleHelp();
+    return;
+  }
+  // Typing in a field isn't a hotkey.
+  if (e.target.closest?.("input, select, textarea")) return;
+  const combo = comboOf(e);
+  if (!combo) return;
+  const action = HOTKEY_ACTIONS.find((a) => hotkeys[a.id] === combo);
+  if (!action) return;
+  e.preventDefault();
+  action.run();
 });
 
 // --- Right-click menu on a dot: mark friendly / enemy / unknown -------------
@@ -546,12 +785,12 @@ function openMenu(key, clientX, clientY) {
   title.className = "mtitle";
   title.textContent = `${trackLabel(t)}  ${tagName(t)}`;
   menuEl.appendChild(title);
-  for (const id of ["friendly", "enemy", "unknown"]) {
+  for (const id of ["friendly", "enemy", "neutral", "unknown"]) {
     const b = document.createElement("button");
     b.className = `aff ${id}`;
     b.dataset.affil = id;
     b.textContent = id[0].toUpperCase() + id.slice(1);
-    b.classList.toggle("active", id === (t.mark?.affil ?? "unknown"));
+    b.classList.toggle("active", id === affilOf(t));
     menuEl.appendChild(b);
   }
   menuEl.hidden = false;
@@ -564,7 +803,6 @@ function openMenu(key, clientX, clientY) {
 
 canvas.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  if (e.ctrlKey) return; // on macOS ctrl+click is a context click: it's a pan
   if (hoverKey) openMenu(hoverKey, e.clientX, e.clientY);
   else closeMenu();
 });
@@ -621,12 +859,38 @@ const ICON_SVG = {
   airplane: (c) => `
     <path d="M12 1.5l1.8 7.2L22 13v2.2l-8.2-2.2-.5 5.6 2.7 2v1.4L12 21l-3.8.9v-1.4l2.7-2-.5-5.6L2 15.2V13l8.2-4.3z"
       fill="${c}" stroke="#0b0f14" stroke-width=".8" stroke-linejoin="round"/>`,
+  // Bird in flight from above: round head, curved wings, fan tail.
+  bird: (c) => `
+    <g fill="${c}" stroke="#0b0f14" stroke-width=".8" stroke-linejoin="round">
+      <path d="M10.4 10C7 8.5 3.5 9.5 1.5 13c3-.5 5 0 6.5 1.5l2.4-.5z"/>
+      <path d="M13.6 10c3.4-1.5 6.9-.5 8.9 3-3-.5-5 0-6.500 1.500l-2.400-.5z"/>
+      <path d="M10.4 15.500L12 22l1.600-6.500z"/>
+      <ellipse cx="12" cy="12" rx="2" ry="4.800"/>
+      <circle cx="12" cy="6.800" r="1.700"/>
+      <path d="M11.200 5.400L12 3.600l.8 1.800z"/>
+    </g>`,
+  // Helicopter from above: fuselage, tail boom and rotor, main rotor blades.
+  helicopter: (c) => `
+    <path d="M12 12v9.500M9.800 21.500h4.400" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>
+    <ellipse cx="12" cy="10.500" rx="3" ry="4.800" fill="${c}" stroke="#0b0f14" stroke-width=".8"/>
+    <path d="M3 3l18 15M21 3L3 18" stroke="${c}" stroke-width="1.400" stroke-linecap="round" opacity=".8"/>
+    <circle cx="12" cy="10.500" r="1.500" fill="#0b0f14" stroke="${c}" stroke-width=".8"/>`,
+  // Not identified yet: a question mark.
+  unknown: (c) => `
+    <circle cx="12" cy="12" r="10" fill="#0b0f14" fill-opacity=".7" stroke="${c}" stroke-width="1.6"/>
+    <path d="M8.8 9.2a3.2 3.2 0 1 1 4.6 2.9c-.9.5-1.4 1-1.4 2" stroke="${c}" stroke-width="2" fill="none" stroke-linecap="round"/>
+    <circle cx="12" cy="17.2" r="1.3" fill="${c}"/>`,
 };
-const ICON_KIND = ["drone", "airplane"]; // by class_id; other tags get no icon
+// Which icon a target gets: by tag, or "unknown" until it is identified.
+// Helicopters (and anything else) get none.
+const iconKindOf = (t) => {
+  const kind = t.cls === UNIDENTIFIED ? "unknown" : CLASS_NAMES[t.cls];
+  return ICON_SVG[kind] ? kind : undefined;
+};
 const iconCache = new Map(); // "kind:color" -> HTMLImageElement
 
 function iconFor(t) {
-  const kind = ICON_KIND[t.cls]; // undefined for unidentified / other tags
+  const kind = iconKindOf(t);
   if (!kind) return null;
   const color = colorOf(t);
   const k = `${kind}:${color}`;
@@ -640,22 +904,47 @@ function iconFor(t) {
   return img.complete && img.naturalWidth ? { img, kind } : null;
 }
 
+// --- Our radar installation, drawn at the center of the map ----------------
+// A dish on a mast over a base, with signal arcs, inside a dark disc so it
+// reads on both the satellite map and the plain background.
+const RADAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 48 48">
+  <circle cx="24" cy="24" r="22" fill="#0b0f14" fill-opacity=".85" stroke="#38bdf8" stroke-width="1.6"/>
+  <path d="M10 37h28l-3-6H13z" fill="#1e3a4f" stroke="#38bdf8" stroke-width="1.2" stroke-linejoin="round"/>
+  <path d="M24 31V22" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round"/>
+  <g transform="rotate(-35 24 22)">
+    <path d="M14 14q10 14 20 0z" fill="#38bdf8" fill-opacity=".35" stroke="#e0f2fe" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M24 20V11" stroke="#e0f2fe" stroke-width="1.6" stroke-linecap="round"/>
+    <circle cx="24" cy="10" r="1.8" fill="#e0f2fe"/>
+  </g>
+  <path d="M33 8q5 3 6 9M36 5q7 4 8 13" stroke="#38bdf8" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+</svg>`;
+const RADAR_MIN_PX = 14; // size at zoom 1 (whole range in view)
+const RADAR_MAX_PX = 40; // never larger than this
+const RADAR_PX_PER_ZOOM = 4; // growth per zoom step
+const radarImg = new Image();
+radarImg.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(RADAR_SVG)}`;
+
+function drawRadar(g, x, y, size) {
+  if (radarImg.complete && radarImg.naturalWidth) {
+    g.drawImage(radarImg, x - size / 2, y - size / 2, size, size);
+  }
+}
+
 // Radar-style measurements from the radar-relative position and velocity.
 function describe(t) {
   const ground = Math.hypot(t.x, t.y);
   const range = Math.hypot(ground, t.z);
   const azimuth = ((Math.atan2(t.x, t.y) * 180) / Math.PI + 360) % 360; // from north, clockwise
-  const elevation = (Math.atan2(t.z, ground) * 180) / Math.PI;
   const speed = Math.hypot(t.vx, t.vy, t.vz);
   // Positive = moving away from the radar.
   const radial = range > 0 ? (t.x * t.vx + t.y * t.vy + t.z * t.vz) / range : 0;
 
   const row = (label, value) => `${label.padEnd(10)}${value}`;
   return [
-    `${trackLabel(t)}  ${tagName(t)}  [${t.mark?.affil ?? "unknown"}]`,
+    `${trackLabel(t)}  ${tagName(t)}  [${affilOf(t)}]`,
     row("Range", fmtDist(range)),
     row("Azimuth", `${azimuth.toFixed(1)}°`),
-    row("Elevation", `${elevation.toFixed(1)}°`),
+    row("Elevation", fmtHeight(t.z)),
     row("Velocity", fmtSpeed(speed)),
     row("Radial", fmtSpeed(radial, true)), // + = moving away
     row("Strength", `${t.strength} (${Math.round((t.strength / 255) * 100)}%)`),
@@ -672,14 +961,17 @@ const filterEl = document.getElementById("targetFilter");
 const showIgnoredEl = document.getElementById("showIgnored");
 const countEl = document.getElementById("targetCount");
 
-// List sections, top to bottom. Targets with no mark count as unknown.
+// List sections, top to bottom.
 const GROUPS = [
   { id: "unknown", label: "Unknown", color: AFFIL_COLOR.unknown },
   { id: "enemy", label: "Enemy", color: AFFIL_COLOR.enemy },
   { id: "friendly", label: "Friendly", color: AFFIL_COLOR.friendly },
+  { id: "neutral", label: "Neutral", color: AFFIL_COLOR.neutral },
 ];
-const groupOf = (t) =>
-  t.mark?.affil === "enemy" ? 1 : t.mark?.affil === "friendly" ? 2 : 0;
+const groupOf = (t) => {
+  const i = GROUPS.findIndex((g) => g.id === affilOf(t));
+  return i < 0 ? 0 : i;
+};
 
 // Rows in display order: a { header: true, ... } entry before each section's
 // targets, which are sorted by generator then track number.
@@ -738,7 +1030,7 @@ function updateList(now) {
       }
       if (
         filter &&
-        !`${trackLabel(t)} ${tagName(t)} ${t.mark?.affil ?? "unknown"}`
+        !`${trackLabel(t)} ${tagName(t)} ${affilOf(t)}`
           .toLowerCase()
           .includes(filter)
       ) {
@@ -881,7 +1173,7 @@ for (const [cls, name] of TAG_CHIPS) {
 
 // Same for designations (friendly / unknown / enemy), tinted like the marks.
 const affilChipsEl = document.getElementById("ignoreAffils");
-for (const id of ["friendly", "unknown", "enemy"]) {
+for (const id of ["friendly", "unknown", "enemy", "neutral"]) {
   const chip = document.createElement("button");
   chip.className = "chip";
   chip.textContent = id;
@@ -927,7 +1219,7 @@ trailSel.addEventListener("change", () => {
 function updateActions(t) {
   const typeIgnored = !!t && ignoredByFilter(t);
   const sig = t
-    ? `${t.key}|${t.mark?.affil}|${t.mark?.ignored}|${typeIgnored}|${t.cap}`
+    ? `${t.key}|${affilOf(t)}|${t.mark?.ignored}|${typeIgnored}|${t.cap}`
     : "";
   if (sig === actionsSig) return;
   actionsSig = sig;
@@ -941,9 +1233,7 @@ function updateActions(t) {
   for (const b of actionsEl.querySelectorAll("[data-affil]")) {
     b.classList.toggle(
       "active",
-      !!t &&
-        !!b.dataset.affil &&
-        b.dataset.affil === (t.mark?.affil ?? "unknown"),
+      !!t && !!b.dataset.affil && b.dataset.affil === affilOf(t),
     );
   }
   // If the whole tag is ignored, this target can't be un-ignored on its own:
@@ -955,7 +1245,7 @@ function updateActions(t) {
       ? "Unignore"
       : "Ignore";
   ignoreBtn.disabled = !t || byType;
-  trailSel.value = String(t ? t.cap : TRAIL_LEN);
+  trailSel.value = String(t ? t.cap : DEFAULT_TRAIL_LEN);
 }
 
 // --- Map background (MapTiler tiles, fetched through our server) ----------------
@@ -1198,8 +1488,12 @@ function draw() {
     ctx.translate(px, py);
     // Airplanes point along their heading (clockwise from north); the nose of
     // the SVG points up.
-    if (icon.kind === "airplane") ctx.rotate(Math.atan2(t.vx, t.vy));
-    ctx.drawImage(icon.img, -size / 2, -size / 2, size, size);
+    if (icon.kind !== "drone" && icon.kind !== "unknown")
+      ctx.rotate(Math.atan2(t.vx, t.vy));
+    // Birds and "?" are drawn smaller than the aircraft.
+    const s =
+      icon.kind === "bird" || icon.kind === "unknown" ? size * 0.7 : size;
+    ctx.drawImage(icon.img, -s / 2, -s / 2, s, s);
     ctx.restore();
   };
 
@@ -1222,6 +1516,14 @@ function draw() {
   ctx.moveTo(ox, oy - WORLD_RADIUS_M * scale);
   ctx.lineTo(ox, oy + WORLD_RADIUS_M * scale);
   ctx.stroke();
+
+  // Small when zoomed out, growing with zoom up to a maximum size.
+  drawRadar(
+    ctx,
+    ox,
+    oy,
+    Math.min(RADAR_MAX_PX, RADAR_MIN_PX + (view.zoom - 1) * RADAR_PX_PER_ZOOM),
+  );
 
   // Batch drawing by color (a generator's, or a mark's) instead of one
   // stroke/fill per target. Each batch is flushed once it holds MAX_PATH_OPS
@@ -1285,7 +1587,7 @@ function draw() {
       }
     }
     if (labelAll) labels.push(t, px, py);
-    if (iconsAll && ICON_KIND[t.cls]) icons.push(t, px, py);
+    if (iconsAll && iconKindOf(t)) icons.push(t, px, py);
 
     // velocity vector (1s lookahead)
     g.lines.moveTo(px, py);
@@ -1407,7 +1709,7 @@ const zoomLabel = document.getElementById("zoomLabel");
 let miniSize = 0;
 let miniAt = 0;
 let miniSig = "";
-const MINI_COLORS = ["unknown", "enemy", "friendly"]; // draw friendly last
+const MINI_COLORS = ["neutral", "unknown", "enemy", "friendly"]; // draw friendly last
 
 function sizeMinimap() {
   const dpr = window.devicePixelRatio || 1;
@@ -1462,6 +1764,8 @@ function drawMinimap(now, cx, cy, scale) {
       mctx.fillRect(c + t.x * s - 1, c - t.y * s - 1, 2, 2);
     }
   }
+  drawRadar(mctx, c, c, 14);
+
   const sel = selectedTrack();
   if (sel) {
     mctx.strokeStyle = "#fff";

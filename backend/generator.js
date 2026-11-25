@@ -13,12 +13,44 @@ const rand = (min, max) => min + Math.random() * (max - min);
 
 // Fake target tags. The array index is sent as `class_id`; the UI has the same
 // list of names (renderer/app.js, CLASS_NAMES). Keep the two in the same order.
+// speed and climb are in m/s (climb = max vertical speed), alt in meters.
 const CLASSES = [
-  { name: "drone", speed: [8, 25], alt: [20, 150], rcs: 0.55, weight: 40 },
-  { name: "airplane", speed: [60, 120], alt: [300, 1000], rcs: 1, weight: 20 },
-  { name: "helicopter", speed: [25, 60], alt: [80, 400], rcs: 0.8, weight: 15 },
-  { name: "bird", speed: [4, 15], alt: [10, 80], rcs: 0.3, weight: 25 },
+  {
+    name: "drone",
+    speed: [3, 12],
+    climb: 3,
+    alt: [20, 150],
+    rcs: 0.55,
+    weight: 40,
+  },
+  {
+    name: "airplane",
+    speed: [45, 80],
+    climb: 5,
+    alt: [300, 1000],
+    rcs: 1,
+    weight: 20,
+  },
+  {
+    name: "helicopter",
+    speed: [15, 40],
+    climb: 4,
+    alt: [80, 400],
+    rcs: 0.8,
+    weight: 15,
+  },
+  {
+    name: "bird",
+    speed: [3, 10],
+    climb: 1.5,
+    alt: [10, 80],
+    rcs: 0.3,
+    weight: 25,
+  },
 ];
+
+// Chance that a target can never be identified (it stays "?" on the UI).
+const UNIDENTIFIED_CHANCE = 0.15;
 
 // Sent as `class_id` until a target has been "identified".
 const UNIDENTIFIED = 255;
@@ -33,7 +65,13 @@ function pickClass() {
 }
 
 // `cls` is kept when a target is respawned (e.g. motion pattern change).
-function spawn(id, pattern, cls = pickClass()) {
+// `unidentifiable` is also kept; when omitted it is chosen at random.
+function spawn(
+  id,
+  pattern,
+  cls = pickClass(),
+  unidentifiable = Math.random() < UNIDENTIFIED_CHANCE,
+) {
   const resolved =
     pattern === "mixed" ? ["orbit", "patrol", "randomWalk"][id % 3] : pattern;
 
@@ -42,11 +80,13 @@ function spawn(id, pattern, cls = pickClass()) {
   e.altMin = c.alt[0];
   e.altMax = c.alt[1];
   e.z = rand(e.altMin, e.altMax);
-  e.vz = (rand(-1, 1) * (e.altMax - e.altMin)) / 20; // climbs/descends slowly
+  e.vz = rand(-1, 1) * c.climb; // climbs/descends slowly
   e.rcs = c.rcs;
   // A new track is unidentified until it has been observed for a few seconds.
+  // Some are never identified (the radar's classification fails).
   e.age = 0;
-  e.identifyAfter = rand(1, 6);
+  e.unidentifiable = unidentifiable;
+  e.identifyAfter = unidentifiable ? Infinity : rand(1, 6);
   const speed = rand(c.speed[0], c.speed[1]);
 
   if (resolved === "orbit") {
@@ -133,13 +173,22 @@ class Sim {
     this.pattern = config.motionPattern;
     this.nextId = 1;
     this.entities = [];
+    // The first targets of a generator cover every class once, in random
+    // order, and the one after them never gets identified.
+    this.startClasses = CLASSES.map((_, i) => i).sort(
+      () => Math.random() - 0.5,
+    );
     this.resize(config.targetCount);
   }
 
   resize(n) {
     this.entities.length = Math.min(this.entities.length, n);
     while (this.entities.length < n) {
-      this.entities.push(spawn(this.nextId++, this.pattern));
+      const i = this.nextId - 1;
+      const cls = i < CLASSES.length ? this.startClasses[i] : undefined;
+      const unid =
+        i === CLASSES.length ? true : i < CLASSES.length ? false : undefined;
+      this.entities.push(spawn(this.nextId++, this.pattern, cls, unid));
     }
   }
 
@@ -148,7 +197,7 @@ class Sim {
     if (config.motionPattern !== this.pattern) {
       this.pattern = config.motionPattern;
       this.entities = this.entities.map((e) =>
-        spawn(e.id, this.pattern, e.cls),
+        spawn(e.id, this.pattern, e.cls, e.unidentifiable),
       );
     }
     this.resize(config.targetCount);

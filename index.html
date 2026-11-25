@@ -251,6 +251,15 @@
         color: #eab308;
         border-color: #713f12;
       }
+      .aff.neutral {
+        color: #94a3b8;
+        border-color: #475569;
+      }
+      .aff.neutral.active {
+        background: #475569;
+        border-color: #94a3b8;
+        color: #fff;
+      }
       .aff.friendly.active {
         background: #166534;
         border-color: #22c55e;
@@ -386,6 +395,110 @@
         border-left: 1px solid #1c2530;
         padding: 14px 18px 14px 16px;
       }
+      #helpBtn {
+        height: 26px;
+        padding: 0 12px;
+        border-radius: 13px;
+        border: 1px solid #2a3644;
+        background: #121922;
+        color: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #helpOverlay {
+        position: fixed;
+        inset: 0;
+        z-index: 30;
+        background: rgba(0, 0, 0, 0.55);
+        align-items: center;
+        justify-content: center;
+      }
+      #helpOverlay:not([hidden]) {
+        display: flex;
+      }
+      #helpPanel {
+        width: 440px;
+        max-width: 92vw;
+        max-height: 85vh;
+        overflow-y: auto;
+        padding: 14px 18px 18px;
+        border: 1px solid #2a3644;
+        border-radius: 6px;
+        background: #0f151c;
+      }
+      #helpPanel .helphead {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      #helpClose {
+        border: 0;
+        background: none;
+        color: inherit;
+        font-size: 20px;
+        cursor: pointer;
+      }
+      #helpPanel h4 {
+        margin: 16px 0 6px;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #8fa0b3;
+      }
+      .hrow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 4px 0;
+        font-size: 13px;
+      }
+      .hrow > span:last-child {
+        color: #8fa0b3;
+      }
+      .keybtn {
+        min-width: 110px;
+        padding: 3px 8px;
+        border: 1px solid #2a3644;
+        border-radius: 4px;
+        background: #121922;
+        color: inherit;
+        font-family: ui-monospace, monospace;
+        cursor: pointer;
+      }
+      .keybtn.waiting {
+        border-color: #38bdf8;
+        color: #38bdf8;
+      }
+      #resetKeys {
+        margin-top: 8px;
+        padding: 4px 10px;
+        border: 1px solid #2a3644;
+        border-radius: 4px;
+        background: #121922;
+        color: inherit;
+        cursor: pointer;
+      }
+      #debugHeader {
+        position: sticky;
+        top: -14px;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: -14px 0 14px;
+        padding: 10px 0;
+        background: #0b0f14;
+        border-bottom: 1px solid #1c2530;
+      }
+      #debugHeader label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: #8fa0b3;
+        font-size: 12px;
+      }
       .card {
         border: 1px solid #1c2530;
         border-left-width: 4px;
@@ -471,6 +584,9 @@
             Friendly
           </button>
           <button data-affil="enemy" class="aff enemy" disabled>Enemy</button>
+          <button data-affil="neutral" class="aff neutral" disabled>
+            Neutral
+          </button>
           <button data-affil="unknown" class="aff unknown" disabled>
             Unknown
           </button>
@@ -484,7 +600,7 @@
               <option value="100">100 pts</option>
               <option value="250">250 pts</option>
               <option value="500">500 pts</option>
-              <option value="1000">1,000 pts</option>
+              <option value="1000" selected>1,000 pts</option>
               <option value="2500">2,500 pts</option>
             </select>
           </label>
@@ -494,8 +610,6 @@
     </aside>
     <main>
       <header>
-        <strong>Generators</strong>
-        <select id="countSelect"></select>
         <span class="spacer"></span>
         <span class="hint">Map</span>
         <select id="mapSelect">
@@ -507,6 +621,9 @@
         <span class="hint">Units</span>
         <div class="seg" id="unitSeg"></div>
         <span id="conn">disconnected</span>
+        <button id="helpBtn" title="Hotkeys and mouse controls (?)">
+          Controls
+        </button>
       </header>
       <div id="scopeWrap">
         <canvas id="scope"></canvas>
@@ -522,7 +639,24 @@
         </div>
       </div>
     </main>
-    <aside id="cards"></aside>
+    <aside id="cards">
+      <div id="debugHeader">
+        <strong>Debug</strong>
+        <label>
+          Unit Generators
+          <select id="countSelect"></select>
+        </label>
+      </div>
+    </aside>
+    <div id="helpOverlay" hidden>
+      <div id="helpPanel" role="dialog" aria-label="Controls">
+        <div class="helphead">
+          <strong>Controls</strong>
+          <button id="helpClose" title="Close">×</button>
+        </div>
+        <div id="helpBody"></div>
+      </div>
+    </div>
     <div id="tip" class="info" hidden></div>
     <div id="ctxMenu" hidden></div>
     <script src="renderer/app.js"></script>
