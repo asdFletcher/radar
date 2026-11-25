@@ -5,6 +5,7 @@ const http = require("node:http");
 const path = require("node:path");
 const { WebSocketServer, WebSocket } = require("ws");
 const { Generator } = require("./generator");
+const { LiveFeeds } = require("./live");
 
 const MAX_GENERATORS = 20;
 // Hard cap on targets per connection (all of its active generators together),
@@ -266,16 +267,44 @@ class Session {
   }
 }
 
+// --- Live traffic (Radixwave + AISStream), shared by every viewer ---------
+// Set LIVE_FEEDS=off to turn it off. Aircraft need RADIXWAVE_API_KEY, ships AISSTREAM_API_KEY.
+const sessions = new Set();
+const live =
+  process.env.LIVE_FEEDS === "off"
+    ? null
+    : new LiveFeeds({
+        aisKey: process.env.AISSTREAM_API_KEY,
+        radixwaveKey: process.env.RADIXWAVE_API_KEY,
+        broadcast: (frame) => sessions.forEach((s) => s.sendFrame(frame)),
+        broadcastJson: (obj) => {
+          const json = JSON.stringify(obj);
+          for (const s of sessions) {
+            if (s.ws.readyState === WebSocket.OPEN) s.ws.send(json);
+          }
+        },
+      });
+
 wss.on("connection", (ws) => {
   if (wss.clients.size > MAX_CLIENTS) {
     return ws.close(1013, "server busy"); // "try again later"
   }
   const session = new Session(ws);
+  sessions.add(session);
+  if (live) {
+    live.setViewers(sessions.size);
+    const names = live.labelsMessage();
+    if (names) ws.send(JSON.stringify(names));
+  }
   ws.on("message", (data, isBinary) => {
     if (!isBinary) session.handleCommand(data.toString());
   });
   // The simulation exists only while someone is watching it.
-  ws.on("close", () => session.close());
+  ws.on("close", () => {
+    session.close();
+    sessions.delete(session);
+    live?.setViewers(sessions.size);
+  });
   ws.on("error", (err) => console.warn("client error:", err.message));
   session.setActive(Number.isFinite(initialCount) ? initialCount : 2);
 });
@@ -285,6 +314,7 @@ server.listen(PORT, HOST, () => {
 });
 
 function shutdown() {
+  live?.setViewers(0);
   wss.clients.forEach((ws) => ws.close());
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 500).unref();

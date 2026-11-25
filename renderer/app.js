@@ -50,7 +50,7 @@ function fmtSpeed(ms, signed = false) {
 const STALE_MS = 2000;
 const MAX_GENERATORS = 20;
 // Target tags, indexed by the frame's `class_id`. Same order as the backend's CLASSES.
-const CLASS_NAMES = ["drone", "airplane", "helicopter", "bird"];
+const CLASS_NAMES = ["drone", "airplane", "helicopter", "bird", "boat"];
 const UNIDENTIFIED = 255; // class_id before a target has been identified
 const ICON_MAX_TRACKS = 300; // draw drone/airplane icons on every identified target up to this many
 const ROW_H = 26; // target list row height in px (matches .trow in index.html)
@@ -115,10 +115,15 @@ const ignoredTags = new Set();
 // Same idea for designations: "friendly" | "enemy" | "neutral" | "unknown".
 const ignoredAffils = new Set();
 const BIRD = CLASS_NAMES.indexOf("bird");
+// Live traffic (airplanes.live = 101, AISStream = 102) comes from the real
+// world, so it is neutral by default. Names arrive separately from the frames.
+const LIVE_GEN_MIN = 100;
+const LIVE_PREFIX = { 101: "ADS-B", 102: "AIS" };
+const liveLabels = new Map(); // "gen:id" -> callsign / ship name
 // Designation before the user marks a target: birds are neutral; in each
 // generator, tracks 1-2 are enemies and 3-4 are friendlies; the rest unknown.
 function defaultAffil(t) {
-  if (t.cls === BIRD) return "neutral";
+  if (t.cls === BIRD || t.gen >= LIVE_GEN_MIN) return "neutral";
   if (t.id <= 2) return "enemy";
   if (t.id <= 4) return "friendly";
   return "unknown";
@@ -170,6 +175,12 @@ worker.onmessage = ({ data }) => {
       break;
     case "state":
       applyState(data);
+      break;
+    case "labels":
+      for (const [gen, id, label] of data.items) {
+        liveLabels.set(`${gen}:${id}`, label);
+      }
+      listDirty = true;
       break;
     case "stats":
       genStats = data.generators;
@@ -978,6 +989,14 @@ function setText(el, text) {
 
 // Unique on-screen ID: generator + per-generator track number, e.g. "G2-T017".
 function trackLabel(t) {
+  if (t.gen >= LIVE_GEN_MIN) {
+    const name =
+      liveLabels.get(t.key) ??
+      (t.gen === 101
+        ? t.id.toString(16).toUpperCase().padStart(6, "0")
+        : String(t.id));
+    return `${LIVE_PREFIX[t.gen] ?? `G${t.gen}`} ${name}`;
+  }
   return `G${t.gen}-T${String(t.id).padStart(3, "0")}`;
 }
 
@@ -1017,6 +1036,12 @@ const ICON_SVG = {
     <ellipse cx="12" cy="10.500" rx="3" ry="4.800" fill="${c}" stroke="#0b0f14" stroke-width=".8"/>
     <path d="M3 3l18 15M21 3L3 18" stroke="${c}" stroke-width="1.400" stroke-linecap="round" opacity=".8"/>
     <circle cx="12" cy="10.500" r="1.500" fill="#0b0f14" stroke="${c}" stroke-width=".8"/>`,
+  // Ship from above, bow pointing up: hull, cabin and a mast.
+  boat: (c) => `
+    <path d="M12 1.500C15.500 6 17 10 17 15v6.500c0 .8-.6 1.500-1.500 1.500h-7C7.600 23 7 22.300 7 21.500V15c0-5 1.500-9 5-13.500z"
+      fill="${c}" stroke="#0b0f14" stroke-width=".8" stroke-linejoin="round"/>
+    <rect x="9.500" y="12.500" width="5" height="6" rx="1" fill="#0b0f14" fill-opacity=".45"/>
+    <path d="M12 5v5" stroke="#0b0f14" stroke-width=".9" stroke-linecap="round" opacity=".6"/>`,
   // Not identified yet: a question mark.
   unknown: (c) => `
     <circle cx="12" cy="12" r="10" fill="#0b0f14" fill-opacity=".7" stroke="${c}" stroke-width="1.6"/>
@@ -1141,6 +1166,18 @@ function makeRow() {
   return { el, sw, id, tag, rng };
 }
 
+const listIconCache = new Map();
+function listIconUrl(kind, color) {
+  const k = `${kind}:${color}`;
+  let url = listIconCache.get(k);
+  if (!url) {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24">${ICON_SVG[kind](color)}</svg>`;
+    url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    listIconCache.set(k, url);
+  }
+  return url;
+}
+
 function itemAt(clientY) {
   const top = listEl.getBoundingClientRect().top;
   const i = Math.floor((clientY - top + listEl.scrollTop) / ROW_H);
@@ -1255,6 +1292,9 @@ function updateList(now) {
     if (t.header) {
       // Section header: "UNKNOWN ......... 12"
       r.el.classList.remove("sel", "ign");
+      r.el.title = "";
+      r.sw.classList.remove("ico");
+      r.sw.style.backgroundImage = "";
       r.sw.style.background = t.color;
       setText(r.id, t.label);
       setText(r.tag, "");
@@ -1264,13 +1304,51 @@ function updateList(now) {
     }
     r.el.classList.toggle("sel", t.key === selectedKey);
     r.el.classList.toggle("ign", isIgnored(t));
-    r.sw.style.background = colorOf(t);
+    const kind = t.cls === UNIDENTIFIED ? undefined : CLASS_NAMES[t.cls];
+    if (kind && ICON_SVG[kind]) {
+      r.sw.classList.add("ico");
+      r.sw.style.background = "";
+      r.sw.style.backgroundImage = `url("${listIconUrl(kind, colorOf(t))}")`;
+    } else {
+      r.sw.classList.remove("ico");
+      r.sw.style.backgroundImage = "";
+      r.sw.style.background = colorOf(t);
+    }
     setText(r.id, trackLabel(t));
     setText(r.tag, tagName(t));
+    r.el.title = `${trackLabel(t)} · ${tagName(t)}`; // full name when truncated
     r.tag.classList.toggle("unid", t.cls === UNIDENTIFIED);
     setText(r.rng, fmtDist(Math.hypot(t.x, t.y, t.z)));
   }
 }
+
+// Drag the panel's right edge to widen the list (remembered between runs).
+const targetsEl = document.getElementById("targets");
+const resizeEl = document.getElementById("targetResize");
+const savedW = Number(localStorage.getItem("targetsWidth"));
+if (savedW >= 280) targetsEl.style.width = `${savedW}px`;
+resizeEl.addEventListener("mousedown", (e) => {
+  e.preventDefault();
+  resizeEl.classList.add("drag");
+  const startX = e.clientX;
+  const startW = targetsEl.getBoundingClientRect().width;
+  const move = (ev) => {
+    targetsEl.style.width = `${Math.max(280, startW + ev.clientX - startX)}px`;
+    listDirty = true;
+  };
+  const up = () => {
+    resizeEl.classList.remove("drag");
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", up);
+    localStorage.setItem("targetsWidth", String(Math.round(targetsEl.getBoundingClientRect().width)));
+  };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
+});
+resizeEl.addEventListener("dblclick", () => {
+  targetsEl.style.width = "";
+  localStorage.removeItem("targetsWidth");
+});
 
 listEl.addEventListener("scroll", () => (listDirty = true));
 listEl.addEventListener("mousemove", (e) => {
@@ -1891,10 +1969,18 @@ function draw() {
 
   // Tracked-target panel stays up (and live) until released with Esc.
   if (selected) {
-    setText(
-      selectedEl,
-      `TRACKING${isIgnored(selected) ? " (ignored: hidden from the scope)" : ""}\n${describe(selected)}\n\nEsc to release`,
-    );
+    // The text is live; pause updates while the pointer is over the panel or
+    // a selection is inside it, so it can be selected and copied.
+    const sel = window.getSelection();
+    const holding =
+      selectedEl.matches(":hover") ||
+      (sel && !sel.isCollapsed && selectedEl.contains(sel.anchorNode));
+    if (!holding || selectedEl.hidden) {
+      setText(
+        selectedEl,
+        `TRACKING${isIgnored(selected) ? " (ignored: hidden from the scope)" : ""}\n${describe(selected)}\n\nEsc to release`,
+      );
+    }
     selectedEl.hidden = false;
   } else {
     selectedEl.hidden = true;
@@ -2096,7 +2182,11 @@ function toast(text, color, key) {
   msg.title = "Click to select this target";
   // Clicking the text selects the target; the alert stays until dismissed.
   msg.addEventListener("click", () => {
-    if (tracks.has(key)) select(key);
+    if (!tracks.has(key)) return;
+    select(key);
+    // Jump to the target and keep it centered.
+    followEl.checked = true;
+    followEl.dispatchEvent(new Event("change"));
   });
   const close = document.createElement("button");
   close.className = "tclose";

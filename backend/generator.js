@@ -47,6 +47,15 @@ const CLASSES = [
     rcs: 0.3,
     weight: 25,
   },
+  // Ships only come from the live AIS feed (backend/live.js), never simulated.
+  {
+    name: "boat",
+    speed: [2, 10],
+    climb: 0,
+    alt: [0, 0],
+    rcs: 1,
+    weight: 0,
+  },
 ];
 
 // Chance that a target can never be identified (it stays "?" on the UI).
@@ -175,9 +184,10 @@ class Sim {
     this.entities = [];
     // The first targets of a generator cover every class once, in random
     // order, and the one after them never gets identified.
-    this.startClasses = CLASSES.map((_, i) => i).sort(
-      () => Math.random() - 0.5,
-    );
+    // Classes with weight 0 (boats) are live-only and never simulated.
+    this.startClasses = CLASSES.map((_, i) => i)
+      .filter((i) => CLASSES[i].weight > 0)
+      .sort(() => Math.random() - 0.5);
     this.resize(config.targetCount);
   }
 
@@ -185,9 +195,9 @@ class Sim {
     this.entities.length = Math.min(this.entities.length, n);
     while (this.entities.length < n) {
       const i = this.nextId - 1;
-      const cls = i < CLASSES.length ? this.startClasses[i] : undefined;
-      const unid =
-        i === CLASSES.length ? true : i < CLASSES.length ? false : undefined;
+      const n = this.startClasses.length;
+      const cls = i < n ? this.startClasses[i] : undefined;
+      const unid = i === n ? true : i < n ? false : undefined;
       this.entities.push(spawn(this.nextId++, this.pattern, cls, unid));
     }
   }
