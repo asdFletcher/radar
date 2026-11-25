@@ -3,6 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <title>Radar Mock</title>
+    <script>
+      // Umami analytics: paste your website ID from the Umami dashboard below.
+      // Only loads on the hosted site (not in Electron or on localhost), and
+      // does nothing until an ID is set.
+      (() => {
+        const UMAMI_WEBSITE_ID = "fbfd66e2-214b-49cf-b208-5f18d06e5e60";
+        const hosted =
+          /^https?:$/.test(location.protocol) &&
+          !["localhost", "127.0.0.1"].includes(location.hostname);
+        if (!UMAMI_WEBSITE_ID || !hosted) return;
+        const s = document.createElement("script");
+        s.defer = true;
+        s.src = "https://cloud.umami.is/script.js";
+        s.dataset.websiteId = UMAMI_WEBSITE_ID;
+        document.head.appendChild(s);
+      })();
+    </script>
     <style>
       * {
         box-sizing: border-box;
