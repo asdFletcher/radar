@@ -42,7 +42,7 @@ const PATTERNS = ["mixed", "orbit", "patrol", "randomWalk"];
 
 const DEFAULT_CONFIG = Object.freeze({
   paused: false,
-  targetCount: 6,
+  targetCount: 8,
   rateHz: 10,
   motionPattern: "mixed",
   speedMultiplier: 1,

@@ -184,7 +184,68 @@ worker.onmessage = ({ data }) => {
   }
 };
 
+// --- Hold Space to freeze ---------------------------------------------------
+// While frozen, incoming frames are queued instead of applied, so the scope
+// stands still for selecting targets. On release the queue is replayed in
+// order: targets jump to their current positions and trails include every
+// position passed through. If the queue outgrows the cap, the oldest frames
+// are dropped (leaving a gap in the trails).
+const FREEZE_MAX_BYTES = 256 * 1024 * 1024;
+let frozen = false;
+let frozenQueue = [];
+let frozenBytes = 0;
+
+const freezeBanner = Object.assign(document.createElement("div"), {
+  textContent: "FROZEN — release Space to resume",
+});
+Object.assign(freezeBanner.style, {
+  position: "fixed",
+  top: "8px",
+  left: "50%",
+  transform: "translateX(-50%)",
+  padding: "4px 12px",
+  background: "rgba(56, 189, 248, 0.9)",
+  color: "#0b0f14",
+  font: "600 12px system-ui",
+  borderRadius: "4px",
+  zIndex: 50,
+  pointerEvents: "none",
+});
+freezeBanner.hidden = true;
+document.body.appendChild(freezeBanner);
+
+function setFrozen(on) {
+  if (on === frozen) return;
+  frozen = on;
+  freezeBanner.hidden = !on;
+  if (on) return;
+  const queue = frozenQueue;
+  frozenQueue = [];
+  frozenBytes = 0;
+  for (const buf of queue) applyFrame(buf);
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.code !== "Space") return;
+  if (e.target.closest?.("input, select, textarea")) return;
+  e.preventDefault(); // no button activation or page scroll
+  setFrozen(true);
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Space") setFrozen(false);
+});
+window.addEventListener("blur", () => setFrozen(false));
+
 function ingestFrame(buf) {
+  if (!frozen) return applyFrame(buf);
+  frozenQueue.push(buf);
+  frozenBytes += buf.byteLength;
+  while (frozenBytes > FREEZE_MAX_BYTES && frozenQueue.length > 1) {
+    frozenBytes -= frozenQueue.shift().byteLength;
+  }
+}
+
+function applyFrame(buf) {
   const view = new DataView(buf);
   const gen = view.getUint32(0, true);
   const count = view.getUint32(16, true);
@@ -450,7 +511,11 @@ canvas.addEventListener("click", (e) => {
 // --- View: pan and zoom -------------------------------------------------
 // `view` is the world point (meters) at the center of the scope, plus a zoom
 // factor where 1 shows the whole radar range.
-const view = { x: 0, y: 0, zoom: 1 };
+// The home view (the default, and where "Reset view" returns to) is the whole
+// radar range centered on the radar. You can pan beyond it by PAN_MARGIN_M.
+const HOME_VIEW = { x: 0, y: 0, zoom: 1 };
+const PAN_MARGIN_M = 3219; // 2 miles
+const view = { ...HOME_VIEW };
 const MAX_ZOOM = 60;
 let panning = null; // { sx, sy, vx, vy } while ctrl+dragging
 let justPanned = false;
@@ -458,17 +523,32 @@ let justPanned = false;
 const pxPerMeter = () =>
   ((Math.min(cssW, cssH) / 2 - 20) / WORLD_RADIUS_M) * view.zoom;
 
-// Keep the view inside the radar range (at zoom 1 it is locked to the center).
+// Keep the visible area within the home area plus PAN_MARGIN_M on every side.
 function clampView() {
   view.zoom = Math.max(1, Math.min(MAX_ZOOM, view.zoom));
-  const lim = WORLD_RADIUS_M * (1 - 1 / view.zoom);
+  const lim = WORLD_RADIUS_M * (1 - 1 / view.zoom) + PAN_MARGIN_M;
   view.x = Math.max(-lim, Math.min(lim, view.x));
   view.y = Math.max(-lim, Math.min(lim, view.y));
 }
 
 function resetView() {
-  view.x = view.y = 0;
-  view.zoom = 1;
+  Object.assign(view, HOME_VIEW);
+  followPaused = true; // stay on the home view until the next selection
+}
+
+// Follow: while a target is selected, keep it at the center of the scope.
+// Panning by hand turns it off; resetting the view pauses it until you select
+// again.
+const followEl = document.getElementById("followSel");
+followEl.checked = localStorage.getItem("follow") !== "0"; // default on
+followEl.addEventListener("change", () => {
+  localStorage.setItem("follow", followEl.checked ? "1" : "0");
+  followPaused = false;
+});
+let followPaused = false;
+// Panning by hand turns Follow off (untick only; the saved default stays on).
+function stopFollowing() {
+  followEl.checked = false;
 }
 
 // Middle-mouse drag pans. By default the map follows the pointer (drag left,
@@ -484,7 +564,10 @@ window.addEventListener("mousemove", (e) => {
   if (!panning) return;
   const dx = e.clientX - panning.sx;
   const dy = e.clientY - panning.sy;
-  if (Math.abs(dx) + Math.abs(dy) > 3) justPanned = true;
+  if (Math.abs(dx) + Math.abs(dy) > 3) {
+    justPanned = true;
+    stopFollowing();
+  }
   const s = pxPerMeter();
   const k = invertPan ? 1 : -1;
   view.x = panning.vx + (k * dx) / s;
@@ -538,6 +621,7 @@ document.getElementById("resetView").addEventListener("click", resetView);
 // The one place selection changes, so the list repaints its highlight.
 function select(key) {
   selectedKey = key;
+  followPaused = false;
   listDirty = true;
 }
 
@@ -569,6 +653,15 @@ const HOTKEY_ACTIONS = [
     },
   },
   { id: "resetView", label: "Reset zoom and pan", def: "R", run: resetView },
+  {
+    id: "toggleFollow",
+    label: "Follow selected target on / off",
+    def: "T",
+    run: () => {
+      followEl.checked = !followEl.checked;
+      followEl.dispatchEvent(new Event("change")); // saves it, resumes following
+    },
+  },
   { id: "zoomIn", label: "Zoom in", def: "+", run: () => zoomBy(1.25) },
   { id: "zoomOut", label: "Zoom out", def: "-", run: () => zoomBy(1 / 1.25) },
   {
@@ -675,6 +768,11 @@ function renderHelp() {
     b.title = "Click, then press the new key. Backspace unbinds, Esc cancels.";
     row(a.label, b);
   }
+  // Fixed key (not rebindable), so shown as plain text rather than a button.
+  row(
+    "Freeze the scope",
+    Object.assign(document.createElement("span"), { textContent: "Hold Space" }),
+  );
   const reset = document.createElement("button");
   reset.id = "resetKeys";
   reset.textContent = "Reset hotkeys to defaults";
@@ -859,16 +957,17 @@ const ICON_SVG = {
   airplane: (c) => `
     <path d="M12 1.5l1.8 7.2L22 13v2.2l-8.2-2.2-.5 5.6 2.7 2v1.4L12 21l-3.8.9v-1.4l2.7-2-.5-5.6L2 15.2V13l8.2-4.3z"
       fill="${c}" stroke="#0b0f14" stroke-width=".8" stroke-linejoin="round"/>`,
-  // Bird in flight from above: round head, curved wings, fan tail.
+  // Bird in flight, side view, facing right (flipped in drawIcon when it
+  // heads left): body, raised wing, tail, round head and a yellow beak.
   bird: (c) => `
     <g fill="${c}" stroke="#0b0f14" stroke-width=".8" stroke-linejoin="round">
-      <path d="M10.4 10C7 8.5 3.5 9.5 1.5 13c3-.5 5 0 6.5 1.5l2.4-.5z"/>
-      <path d="M13.6 10c3.4-1.5 6.9-.5 8.9 3-3-.5-5 0-6.500 1.500l-2.400-.5z"/>
-      <path d="M10.4 15.500L12 22l1.600-6.500z"/>
-      <ellipse cx="12" cy="12" rx="2" ry="4.800"/>
-      <circle cx="12" cy="6.800" r="1.700"/>
-      <path d="M11.200 5.400L12 3.600l.8 1.800z"/>
-    </g>`,
+      <path d="M6.500 14.500L1.500 15.500 2.500 13.500 1 11.500 7 12.500z"/>
+      <ellipse cx="11.500" cy="14" rx="6.500" ry="3.200"/>
+      <circle cx="17.800" cy="11.800" r="2.600"/>
+      <path d="M8 13.500C8.500 9 11 5 15 2.500 14.800 6.500 14.500 10 14.500 13.500z"/>
+    </g>
+    <path d="M20 10.800L23.500 12.200 20.200 13.400z" fill="#facc15" stroke="#0b0f14" stroke-width=".6" stroke-linejoin="round"/>
+    <circle cx="18.500" cy="11.200" r=".6" fill="#0b0f14"/>`,
   // Helicopter from above: fuselage, tail boom and rotor, main rotor blades.
   helicopter: (c) => `
     <path d="M12 12v9.500M9.800 21.500h4.400" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>
@@ -960,6 +1059,7 @@ const listInner = document.getElementById("targetInner");
 const filterEl = document.getElementById("targetFilter");
 const showIgnoredEl = document.getElementById("showIgnored");
 const countEl = document.getElementById("targetCount");
+const onScreenEl = document.getElementById("onScreenOnly");
 
 // List sections, top to bottom.
 const GROUPS = [
@@ -1007,12 +1107,21 @@ function itemAt(clientY) {
 function updateList(now) {
   const filter = filterEl.value.trim().toLowerCase();
   const showIgnored = showIgnoredEl.checked;
+  const onScreenOnly = onScreenEl.checked;
+  // Visible world rectangle (same mapping as draw()).
+  const hwM = cssW / 2 / pxPerMeter();
+  const hhM = cssH / 2 / pxPerMeter();
+  const viewSig = `${view.x}|${view.y}|${view.zoom}|${cssW}|${cssH}`;
   // The tag of a target can change (it gets identified), so with a filter
-  // active, rebuild periodically as well.
+  // active, rebuild periodically as well. Targets move on and off screen, so
+  // the on-screen filter rebuilds more often.
   const rebuild =
     listBuilt.version !== listVersion ||
     listBuilt.filter !== filter ||
     listBuilt.showIgnored !== showIgnored ||
+    listBuilt.onScreenOnly !== onScreenOnly ||
+    (onScreenOnly &&
+      (listBuilt.viewSig !== viewSig || now - listBuilt.at > 250)) ||
     ((filter !== "" || ignoredTags.size > 0 || ignoredAffils.size > 0) &&
       now - listBuilt.at > 1000);
 
@@ -1036,6 +1145,12 @@ function updateList(now) {
       ) {
         continue;
       }
+      if (
+        onScreenOnly &&
+        (Math.abs(t.x - view.x) > hwM || Math.abs(t.y - view.y) > hhM)
+      ) {
+        continue;
+      }
       buckets[groupOf(t)].push(t);
     }
     // Sections top to bottom: unknown, enemy, friendly. Empty ones are skipped.
@@ -1047,7 +1162,14 @@ function updateList(now) {
       listItems.push({ header: true, ...group, count: members.length });
       for (const t of members) listItems.push(t);
     });
-    listBuilt = { version: listVersion, filter, showIgnored, at: now };
+    listBuilt = {
+      version: listVersion,
+      filter,
+      showIgnored,
+      onScreenOnly,
+      viewSig,
+      at: now,
+    };
     listInner.style.height = `${listItems.length * ROW_H}px`;
     setText(
       countEl,
@@ -1275,12 +1397,30 @@ const tileCache = new Map(); // "layer/z/x/y" -> { img, ok }, least recently use
 let tileRequests = 0;
 
 // Map selector (header): off / streets / satellite / hybrid.
-const mapSelect = document.getElementById("mapSelect");
-mapSelect.value = mapLayer;
-mapSelect.addEventListener("change", () => {
-  mapLayer = mapSelect.value;
-  localStorage.setItem("mapLayer", mapLayer);
-});
+const mapSeg = document.getElementById("mapSeg");
+const MAP_CHOICES = [
+  ["satellite", "Satellite", "Satellite imagery"],
+  ["streets", "Streets", "Street map"],
+  ["hybrid", "Hybrid", "Satellite imagery with street labels"],
+  ["off", "None", "No map"],
+];
+function paintMapButtons() {
+  [...mapSeg.children].forEach((b, i) =>
+    b.classList.toggle("active", MAP_CHOICES[i][0] === mapLayer),
+  );
+}
+for (const [id, label, title] of MAP_CHOICES) {
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.title = title;
+  b.addEventListener("click", () => {
+    mapLayer = id;
+    localStorage.setItem("mapLayer", id);
+    paintMapButtons();
+  });
+  mapSeg.appendChild(b);
+}
+paintMapButtons();
 
 function getTile(layer, z, x, y, request) {
   const key = `${layer}/${z}/${x}/${y}`;
@@ -1364,15 +1504,19 @@ function drawMap(g, w, h, centerX, centerY, scale, toX, toY, attribution) {
   wanted.sort((a, b) => a[2] - b[2]);
 
   for (const [tx, ty] of wanted) {
-    // Screen rectangle of this tile (rounded outward so tiles leave no seams).
+    // Screen rectangle of this tile at its exact (fractional) position. Not
+    // snapping it keeps the imagery's scale and sub-pixel phase steady while
+    // panning; snapping made tile widths flip by a pixel and the picture
+    // shimmer. Growing each tile by half a pixel on every side makes neighbors
+    // overlap on identical imagery, so there are no antialiasing seams.
     const left = toX((-MERC / 2 + tx * size - RADAR_MERC.x) * MERC_K);
     const right = toX((-MERC / 2 + (tx + 1) * size - RADAR_MERC.x) * MERC_K);
     const top = toY((MERC / 2 - ty * size - RADAR_MERC.y) * MERC_K);
     const bottom = toY((MERC / 2 - (ty + 1) * size - RADAR_MERC.y) * MERC_K);
-    const dx = Math.floor(left);
-    const dy = Math.floor(top);
-    const dw = Math.ceil(right) - dx;
-    const dh = Math.ceil(bottom) - dy;
+    const dx = left - 0.5;
+    const dy = top - 0.5;
+    const dw = right - left + 1;
+    const dh = bottom - top + 1;
 
     const t = getTile(mapLayer, z, tx, ty, true);
     if (t?.ok) {
@@ -1422,6 +1566,11 @@ function draw() {
 
   const cx = cssW / 2;
   const cy = cssH / 2;
+  const followed = followEl.checked && !followPaused ? selectedTrack() : null;
+  if (followed) {
+    view.x = followed.x;
+    view.y = followed.y;
+  }
   clampView();
   const scale = pxPerMeter();
   const toX = (x) => cx + (x - view.x) * scale;
@@ -1488,11 +1637,13 @@ function draw() {
     ctx.translate(px, py);
     // Airplanes point along their heading (clockwise from north); the nose of
     // the SVG points up.
-    if (icon.kind !== "drone" && icon.kind !== "unknown")
+    // The bird is a side view: never rotated, just mirrored to face left.
+    if (icon.kind === "bird") {
+      if (t.vx < 0) ctx.scale(-1, 1);
+    } else if (icon.kind !== "drone" && icon.kind !== "unknown")
       ctx.rotate(Math.atan2(t.vx, t.vy));
-    // Birds and "?" are drawn smaller than the aircraft.
-    const s =
-      icon.kind === "bird" || icon.kind === "unknown" ? size * 0.7 : size;
+    // Only the "?" is drawn smaller than the other icons.
+    const s = icon.kind === "unknown" ? size * 0.7 : size;
     ctx.drawImage(icon.img, -s / 2, -s / 2, s, s);
     ctx.restore();
   };
@@ -1549,7 +1700,7 @@ function draw() {
   };
 
   for (const [key, t] of tracks) {
-    if (now - t.seen > STALE_MS) {
+    if (!frozen && now - t.seen > STALE_MS) {
       tracks.delete(key);
       listVersion++;
       continue;
@@ -1723,7 +1874,9 @@ function sizeMinimap() {
 new ResizeObserver(sizeMinimap).observe(mini);
 
 const MINI_PAD = 4;
-const miniScale = () => (miniSize / 2 - MINI_PAD) / WORLD_RADIUS_M;
+// The minimap covers the home area plus the pannable margin.
+const miniScale = () =>
+  (miniSize / 2 - MINI_PAD) / (WORLD_RADIUS_M + PAN_MARGIN_M);
 
 function drawMinimap(now, cx, cy, scale) {
   setText(zoomLabel, `${view.zoom.toFixed(1)}×`);
@@ -1793,6 +1946,7 @@ let miniDrag = false;
 function miniMove(e) {
   const r = mini.getBoundingClientRect();
   const s = miniScale();
+  stopFollowing();
   view.x = (e.clientX - r.left - miniSize / 2) / s;
   view.y = -(e.clientY - r.top - miniSize / 2) / s;
   clampView();

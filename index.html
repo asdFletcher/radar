@@ -185,6 +185,9 @@
         color: #8fa0b3;
         text-decoration: line-through;
       }
+      #followChk {
+        margin: 0 8px 0 0;
+      }
       .chk {
         display: flex;
         align-items: center;
@@ -576,6 +579,10 @@
         <label class="chk">
           <input type="checkbox" id="showIgnored" checked /> Show ignored
         </label>
+        <label class="chk">
+          <input type="checkbox" id="onScreenOnly" checked /> Only targets on
+          screen
+        </label>
       </div>
       <div id="actions">
         <div id="actionTitle">Select a target to mark it</div>
@@ -611,13 +618,11 @@
     <main>
       <header>
         <span class="spacer"></span>
+        <label class="chk" id="followChk" title="Keep the selected target centered as it moves">
+          <input type="checkbox" id="followSel" checked /> Follow target
+        </label>
         <span class="hint">Map</span>
-        <select id="mapSelect">
-          <option value="satellite">Satellite</option>
-          <option value="streets">Streets</option>
-          <option value="hybrid">Satellite + streets</option>
-          <option value="off">Off</option>
-        </select>
+        <div class="seg" id="mapSeg"></div>
         <span class="hint">Units</span>
         <div class="seg" id="unitSeg"></div>
         <span id="conn">disconnected</span>
