@@ -296,6 +296,7 @@ function applyFrame(buf) {
     t.vx = vx;
     t.vy = vy;
     t.seen = now;
+    checkZones(t);
   }
 }
 
@@ -636,6 +637,21 @@ const zoomBy = (f) => {
   view.zoom *= f;
   clampView();
 };
+// Select the next / previous target in the order the list shows them (so it
+// follows the list's filters and sections), wrapping around at the ends.
+function cycleTarget(dir) {
+  const items = listItems.filter((it) => !it.header);
+  if (!items.length) return;
+  const i = items.findIndex((t) => t.key === selectedKey);
+  const next =
+    i < 0
+      ? dir > 0
+        ? 0
+        : items.length - 1
+      : (i + dir + items.length) % items.length;
+  select(items[next].key);
+  scrollListTo = items[next].key; // keep its row in view
+}
 const HOTKEY_ACTIONS = [
   {
     id: "help",
@@ -653,6 +669,18 @@ const HOTKEY_ACTIONS = [
     },
   },
   { id: "resetView", label: "Reset zoom and pan", def: "R", run: resetView },
+  {
+    id: "nextTarget",
+    label: "Select next target",
+    def: "Tab",
+    run: () => cycleTarget(1),
+  },
+  {
+    id: "prevTarget",
+    label: "Select previous target",
+    def: "Shift+Tab",
+    run: () => cycleTarget(-1),
+  },
   {
     id: "toggleFollow",
     label: "Follow selected target on / off",
@@ -771,7 +799,9 @@ function renderHelp() {
   // Fixed key (not rebindable), so shown as plain text rather than a button.
   row(
     "Freeze the scope",
-    Object.assign(document.createElement("span"), { textContent: "Hold Space" }),
+    Object.assign(document.createElement("span"), {
+      textContent: "Hold Space",
+    }),
   );
   const reset = document.createElement("button");
   reset.id = "resetKeys";
@@ -1601,6 +1631,7 @@ function draw() {
   const ox = toX(0); // the radar
   const oy = toY(0);
   drawMap(ctx, cssW, cssH, view.x, view.y, scale, toX, toY, true);
+  drawZones(ctx, toX, toY, scale);
 
   // Trail: sample a few points evenly (always including oldest and newest)
   // and draw a smooth curve through them instead of all 40. Returns the
@@ -1986,4 +2017,492 @@ window.addEventListener("mousemove", (e) => {
 window.addEventListener("mouseup", () => {
   miniDrag = false;
 });
+// --- Zones of interest ------------------------------------------------------
+// Circular or rectangular areas in local meters (x east, y north of the
+// radar). When an enemy or unknown target enters one, a notification pops up.
+// Zones are saved in localStorage. Moving or reshaping one needs edit mode.
+const ZONE_COLOR = "#f59e0b";
+const METERS_PER_MILE = 1609.344;
+
+// lat/lon -> local meters, using the same projection as the map tiles.
+function localFromLatLon(lat, lon) {
+  const my = EARTH_R * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
+  return {
+    x: ((EARTH_R * (lon - RADAR_LON) * Math.PI) / 180) * MERC_K,
+    y: (my - RADAR_MERC.y) * MERC_K,
+  };
+}
+
+const newZoneId = () =>
+  `z${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+function defaultZones() {
+  // The radar sits at the Space Needle. The second zone covers the I-5 Ship
+  // Canal Bridge (running north-south) and 0.15 mile either side of it.
+  const mid = localFromLatLon(47.6495, -122.3222);
+  const south = localFromLatLon(47.6455, -122.3222).y + 450;
+  const north = localFromLatLon(47.6535, -122.3222).y + 350;
+  const half = 0.15 * METERS_PER_MILE;
+  return [
+    {
+      id: newZoneId(),
+      name: "Space Needle",
+      shape: "circle",
+      x: 0,
+      y: 0,
+      r: 500,
+      visible: true,
+    },
+    {
+      id: newZoneId(),
+      name: "I-5 Ship Canal Bridge",
+      shape: "rect",
+      minX: mid.x - half,
+      maxX: mid.x + half,
+      minY: south,
+      maxY: north,
+      visible: true,
+    },
+  ];
+}
+
+function loadZones() {
+  try {
+    const raw = localStorage.getItem("zones");
+    if (raw !== null) {
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) return list;
+    }
+  } catch {}
+  return defaultZones();
+}
+let zones = loadZones();
+let showZones = localStorage.getItem("showZones") !== "0";
+const saveZones = () => localStorage.setItem("zones", JSON.stringify(zones));
+
+const inZone = (z, x, y) =>
+  z.shape === "circle"
+    ? (x - z.x) ** 2 + (y - z.y) ** 2 <= z.r ** 2
+    : x >= z.minX && x <= z.maxX && y >= z.minY && y <= z.maxY;
+
+// --- Notifications ---
+const toastsEl = document.getElementById("toasts");
+function toast(text, color, key) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.style.borderLeftColor = color;
+  const msg = document.createElement("span");
+  msg.className = "tmsg";
+  msg.textContent = text;
+  msg.title = "Click to select this target";
+  // Clicking the text selects the target; the alert stays until dismissed.
+  msg.addEventListener("click", () => {
+    if (tracks.has(key)) select(key);
+  });
+  const close = document.createElement("button");
+  close.className = "tclose";
+  close.textContent = "×";
+  close.title = "Dismiss";
+  close.addEventListener("click", () => el.remove());
+  el.append(msg, close);
+  toastsEl.appendChild(el);
+  if ("Notification" in window && Notification.permission === "granted") {
+    new Notification("Zone alert", { body: text });
+  }
+}
+
+// Called for every target update. Alerts once when an enemy or unknown target
+// enters a zone (again if it leaves and comes back).
+function checkZones(t) {
+  if (!zones.length) return;
+  const threat = !isIgnored(t) && ["enemy", "unknown"].includes(affilOf(t));
+  for (const z of zones) {
+    const inside = threat && inZone(z, t.x, t.y);
+    if (!inside) {
+      if (t.alerted?.delete(z.id) && !t.alerted.size) t.alerted = undefined;
+      continue;
+    }
+    if (t.alerted?.has(z.id)) continue;
+    (t.alerted ??= new Set()).add(z.id);
+    const aff = affilOf(t);
+    toast(
+      `${aff.toUpperCase()} ${trackLabel(t)} (${tagName(t)}) entered ${z.name}`,
+      aff === "enemy" ? AFFIL_COLOR.enemy : AFFIL_COLOR.unknown,
+      t.key,
+    );
+  }
+}
+
+// --- Interaction: create and edit ---
+let zoneShape = "circle"; // shape for new zones
+let creating = false; // waiting for / dragging out a new zone
+let editingId = null; // zone being edited
+let zoneDrag = null; // { kind: "create" | "move" | "resize", ... }
+let draft = null; // zone being dragged out (not saved yet)
+let zoneClickGuard = false; // swallow the click that ends a zone drag
+
+function worldAt(e) {
+  const r = canvas.getBoundingClientRect();
+  const s = pxPerMeter();
+  return {
+    x: view.x + (e.clientX - r.left - cssW / 2) / s,
+    y: view.y - (e.clientY - r.top - cssH / 2) / s,
+  };
+}
+
+// Edit handles in world meters: the circle's east edge, or a rectangle's corners.
+function zoneHandles(z) {
+  if (z.shape === "circle") return [{ id: "r", x: z.x + z.r, y: z.y }];
+  return [
+    { id: "minX,minY", x: z.minX, y: z.minY },
+    { id: "maxX,minY", x: z.maxX, y: z.minY },
+    { id: "minX,maxY", x: z.minX, y: z.maxY },
+    { id: "maxX,maxY", x: z.maxX, y: z.maxY },
+  ];
+}
+
+function setCreating(on) {
+  creating = on;
+  if (on) editingId = null;
+  zoneDrag = null;
+  draft = null;
+  canvas.style.cursor = on ? "crosshair" : "";
+  renderZonePanel();
+}
+function setEditing(id) {
+  editingId = id;
+  if (id) creating = false;
+  zoneDrag = null;
+  draft = null;
+  canvas.style.cursor = "";
+  renderZonePanel();
+}
+
+canvas.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  const w = worldAt(e);
+  if (creating) {
+    zoneDrag = { kind: "create", sx: w.x, sy: w.y };
+    draft =
+      zoneShape === "circle"
+        ? { shape: "circle", x: w.x, y: w.y, r: 0 }
+        : { shape: "rect", minX: w.x, maxX: w.x, minY: w.y, maxY: w.y };
+    zoneClickGuard = true;
+    closeMenu();
+    return;
+  }
+  const z = zones.find((q) => q.id === editingId);
+  if (!z) return;
+  const s = pxPerMeter();
+  const handle = zoneHandles(z).find(
+    (h) => Math.hypot(h.x - w.x, h.y - w.y) * s <= 10,
+  );
+  if (handle) {
+    zoneDrag = { kind: "resize", z, handle: handle.id };
+    zoneClickGuard = true;
+  } else if (inZone(z, w.x, w.y)) {
+    zoneDrag = { kind: "move", z, lx: w.x, ly: w.y };
+    zoneClickGuard = true;
+  }
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (!zoneDrag) {
+    if (editingId && e.target === canvas) {
+      const z = zones.find((q) => q.id === editingId);
+      const w = worldAt(e);
+      canvas.style.cursor =
+        z &&
+        (inZone(z, w.x, w.y) ||
+          zoneHandles(z).some(
+            (h) => Math.hypot(h.x - w.x, h.y - w.y) * pxPerMeter() <= 10,
+          ))
+          ? "move"
+          : "";
+    }
+    return;
+  }
+  const w = worldAt(e);
+  const d = zoneDrag;
+  if (d.kind === "create") {
+    if (zoneShape === "circle") {
+      draft.r = Math.hypot(w.x - d.sx, w.y - d.sy);
+    } else {
+      draft.minX = Math.min(d.sx, w.x);
+      draft.maxX = Math.max(d.sx, w.x);
+      draft.minY = Math.min(d.sy, w.y);
+      draft.maxY = Math.max(d.sy, w.y);
+    }
+  } else if (d.kind === "move") {
+    const dx = w.x - d.lx;
+    const dy = w.y - d.ly;
+    d.lx = w.x;
+    d.ly = w.y;
+    const z = d.z;
+    if (z.shape === "circle") {
+      z.x += dx;
+      z.y += dy;
+    } else {
+      z.minX += dx;
+      z.maxX += dx;
+      z.minY += dy;
+      z.maxY += dy;
+    }
+  } else if (d.kind === "resize") {
+    const z = d.z;
+    if (z.shape === "circle") {
+      z.r = Math.max(10, Math.hypot(w.x - z.x, w.y - z.y));
+    } else {
+      const [hx, hy] = d.handle.split(",");
+      z[hx] = w.x;
+      z[hy] = w.y;
+      // Dragging past the opposite side flips which edge is which.
+      if (z.minX > z.maxX)
+        [z.minX, z.maxX, d.handle] = [
+          z.maxX,
+          z.minX,
+          d.handle.replace(/^(min|max)X/, (m) =>
+            m === "minX" ? "maxX" : "minX",
+          ),
+        ];
+      if (z.minY > z.maxY)
+        [z.minY, z.maxY, d.handle] = [
+          z.maxY,
+          z.minY,
+          d.handle.replace(/(min|max)Y$/, (m) =>
+            m === "minY" ? "maxY" : "minY",
+          ),
+        ];
+    }
+  }
+});
+
+window.addEventListener("mouseup", () => {
+  const d = zoneDrag;
+  if (!d) return;
+  zoneDrag = null;
+  if (d.kind === "create") {
+    const big =
+      draft.shape === "circle"
+        ? draft.r >= 10
+        : draft.maxX - draft.minX >= 10 && draft.maxY - draft.minY >= 10;
+    if (big) {
+      zones.push({
+        ...draft,
+        id: newZoneId(),
+        name: `Zone ${zones.length + 1}`,
+        visible: true,
+      });
+      saveZones();
+    }
+    draft = null;
+    setCreating(false); // one zone per click of "New zone"
+  } else {
+    saveZones();
+  }
+});
+
+// The click that ends a zone drag (or any click while creating) must not
+// select or deselect targets underneath.
+window.addEventListener(
+  "click",
+  (e) => {
+    if (e.target === canvas && (creating || zoneClickGuard)) {
+      e.stopPropagation();
+    }
+    zoneClickGuard = false;
+  },
+  true,
+);
+
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.key !== "Escape" || (!creating && !editingId)) return;
+    e.stopPropagation(); // don't also deselect the target
+    if (creating) setCreating(false);
+    else setEditing(null);
+  },
+  true,
+);
+
+// --- Panel ---
+const zonePanel = document.getElementById("zonePanel");
+function renderZonePanel() {
+  zonePanel.replaceChildren();
+  const head = document.createElement("div");
+  head.className = "zhead";
+  const showLbl = document.createElement("label");
+  showLbl.title = "Show or hide zones on the scope (alerts stay on)";
+  const showBox = Object.assign(document.createElement("input"), {
+    type: "checkbox",
+    checked: showZones,
+  });
+  showBox.dataset.act = "showAll";
+  showLbl.append(showBox, " Zones");
+  const add = document.createElement("button");
+  add.dataset.act = "create";
+  add.textContent = creating ? "Cancel" : "+ New zone";
+  head.append(showLbl, add);
+  zonePanel.appendChild(head);
+
+  if (creating) {
+    const shapes = document.createElement("div");
+    shapes.className = "seg zshape";
+    for (const [id, label] of [
+      ["circle", "Circle"],
+      ["rect", "Rectangle"],
+    ]) {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.dataset.act = "shape";
+      b.dataset.shape = id;
+      b.classList.toggle("active", zoneShape === id);
+      shapes.appendChild(b);
+    }
+    const hint = document.createElement("div");
+    hint.className = "zhint";
+    hint.textContent =
+      zoneShape === "circle"
+        ? "Click the center, drag out the radius, release."
+        : "Click one corner, drag to the opposite corner, release.";
+    zonePanel.append(shapes, hint);
+  }
+
+  for (const z of zones) {
+    const row = document.createElement("div");
+    row.className = "zrow";
+    row.dataset.id = z.id;
+    const vis = Object.assign(document.createElement("input"), {
+      type: "checkbox",
+      checked: z.visible !== false,
+      title: "Show this zone",
+    });
+    vis.dataset.act = "vis";
+    const name = document.createElement("span");
+    name.className = "zname";
+    name.dataset.act = "rename";
+    name.title = "Double-click to rename";
+    name.textContent = z.name;
+    const edit = document.createElement("button");
+    edit.dataset.act = "edit";
+    edit.textContent = editingId === z.id ? "Done" : "Edit";
+    edit.classList.toggle("active", editingId === z.id);
+    const del = document.createElement("button");
+    del.dataset.act = "delete";
+    del.textContent = "Delete";
+    row.append(vis, name, edit, del);
+    zonePanel.appendChild(row);
+  }
+  if (!zones.length) {
+    const none = document.createElement("div");
+    none.className = "zhint";
+    none.textContent = "No zones yet.";
+    zonePanel.appendChild(none);
+  }
+}
+
+zonePanel.addEventListener("click", (e) => {
+  const act = e.target.dataset?.act;
+  const id = e.target.closest(".zrow")?.dataset.id;
+  if (act === "create") {
+    setCreating(!creating);
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission(); // for desktop alerts too
+    }
+  } else if (act === "shape") {
+    zoneShape = e.target.dataset.shape;
+    renderZonePanel();
+  } else if (act === "edit") {
+    setEditing(editingId === id ? null : id);
+  } else if (act === "delete") {
+    const z = zones.find((q) => q.id === id);
+    if (z && confirm(`Delete zone "${z.name}"?`)) {
+      zones = zones.filter((q) => q.id !== id);
+      if (editingId === id) editingId = null;
+      saveZones();
+      renderZonePanel();
+    }
+  }
+});
+zonePanel.addEventListener("change", (e) => {
+  const act = e.target.dataset?.act;
+  if (act === "showAll") {
+    showZones = e.target.checked;
+    localStorage.setItem("showZones", showZones ? "1" : "0");
+  } else if (act === "vis") {
+    const z = zones.find((q) => q.id === e.target.closest(".zrow").dataset.id);
+    if (z) {
+      z.visible = e.target.checked;
+      saveZones();
+    }
+  }
+});
+zonePanel.addEventListener("dblclick", (e) => {
+  if (e.target.dataset?.act !== "rename") return;
+  const z = zones.find((q) => q.id === e.target.closest(".zrow").dataset.id);
+  const name = z && prompt("Zone name", z.name);
+  if (name?.trim()) {
+    z.name = name.trim();
+    saveZones();
+    renderZonePanel();
+  }
+});
+renderZonePanel();
+
+// --- Drawing (called from draw(), under the targets) ---
+function drawZones(g, toX, toY, scale) {
+  if (!showZones && !draft) return;
+  g.save();
+  g.font = "11px system-ui";
+  const one = (z, editing, isDraft) => {
+    g.beginPath();
+    if (z.shape === "circle") {
+      g.arc(toX(z.x), toY(z.y), z.r * scale, 0, Math.PI * 2);
+    } else {
+      g.rect(
+        toX(z.minX),
+        toY(z.maxY),
+        (z.maxX - z.minX) * scale,
+        (z.maxY - z.minY) * scale,
+      );
+    }
+    g.fillStyle = "rgba(245, 158, 11, 0.12)";
+    g.fill();
+    g.strokeStyle = ZONE_COLOR;
+    g.lineWidth = editing ? 2.5 : 1.5;
+    g.setLineDash(isDraft || editing ? [] : [8, 5]);
+    g.stroke();
+    g.setLineDash([]);
+    if (z.name) {
+      const lx =
+        z.shape === "circle" ? toX(z.x) : (toX(z.minX) + toX(z.maxX)) / 2;
+      const ly =
+        z.shape === "circle" ? toY(z.y) - z.r * scale - 6 : toY(z.maxY) - 6;
+      g.textAlign = "center";
+      g.fillStyle = ZONE_COLOR;
+      g.fillText(z.name, lx, ly);
+    }
+    if (editing) {
+      g.fillStyle = "#fff";
+      g.strokeStyle = "#0b0f14";
+      g.lineWidth = 1;
+      for (const h of zoneHandles(z)) {
+        g.beginPath();
+        g.rect(toX(h.x) - 5, toY(h.y) - 5, 10, 10);
+        g.fill();
+        g.stroke();
+      }
+    }
+  };
+  if (showZones) {
+    for (const z of zones) {
+      if (z.visible !== false || z.id === editingId)
+        one(z, z.id === editingId, false);
+    }
+  }
+  if (draft) one(draft, false, true);
+  g.restore();
+}
+
 requestAnimationFrame(draw);
